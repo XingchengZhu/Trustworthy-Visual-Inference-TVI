@@ -1,0 +1,83 @@
+Title: Trustworthy Visual Inference: Synergizing Parametric and Non-Parametric Representations via Optimal Transport and Evidential Fusion
+
+1. 研究背景与问题阐述 (Background & Problem Statement)
+1.1 现状
+深度卷积神经网络（CNNs）已在图像分类任务上取得了超越人类的表现。然而，现有的主流模型主要依赖**参数化（Parametric）**的 Softmax 推理机制，存在两个核心缺陷：
+1. 过度自信（Over-confidence）： 模型倾向于对错误样本或分布外（OOD）样本输出极高的置信度，缺乏对“自身无知（Ignorance）”的表达能力。
+2. 度量失效（Metric Failure）： 传统的 k-NN 辅助推理往往依赖欧氏距离或余弦相似度。但在高维特征空间中，这些刚性度量忽略了特征图的空间结构（Spatial Structure）和几何形变（Geometric Deformation），导致检索结果语义偏差。
+1.2 核心假设
+本研究提出假设：
+1. 图像不应被视为特征空间中的一个单点，而应被视为由局部特征描述符组成的经验分布（Empirical Distribution）。通过**最优传输（Optimal Transport, OT）**理论计算分布间的距离，能更鲁棒地捕捉语义相似性。
+2. 推理不应是单纯的概率预测，而是**证据收集（Evidence Acquisition）**过程。通过 Dempster-Shafer 证据理论 融合参数化（网络权重）与非参数化（OT检索）的证据，可以实现高鲁棒性的可信推理。
+
+2. 研究方法 (Methodology)
+本研究提出一个**无需重训（Training-Free/Post-hoc）**的推理框架，包含三个核心模块。
+总体架构图
+输入图像  经过 Backbone 提取特征。我们保留空间特征图用于 OT 计算，同时保留 Logits 用于参数化证据提取。
+
+Module 1: 基于最优传输的结构化特征度量 (Structure-Aware Metric via Optimal Transport)
+目标： 替代传统的欧氏距离，利用 Wasserstein 距离（推土机距离）解决特征对齐与形变问题。
+具体实现：
+1. 分布建模 (Distribution Modeling):
+放弃全局平均池化（GAP），提取 Backbone 最后一层卷积的特征图 。
+将测试图像  视为一个离散分布 ，其中  是局部特征点的数量， 是特征向量， 是归一化权重（通常设为 ）。同理，训练集中的 Support Set 样本视为分布 。
+2. 代价矩阵构建 (Cost Matrix):
+计算分布  中第  个局部特征与分布  中第  个局部特征的基准距离（如余弦距离）：
+3. Sinkhorn 距离求解 (Sinkhorn Algorithm):
+为了解决标准 OT 计算复杂度高（）的问题，采用熵正则化的 Sinkhorn 算法求解近似 Wasserstein 距离：
+
+其中  是传输方案（Transport Plan）， 是熵正则项。
+创新价值： 该模块允许特征在空间上进行“软匹配（Soft Matching）”，即使物体发生了平移或非刚性形变，OT 依然能通过最小传输代价捕捉到其相似性。
+
+Module 2: 双流证据提取机制 (Dual-Stream Evidence Extraction)
+目标： 将确定性的数值转化为狄利克雷分布（Dirichlet Distribution）的参数，量化“支持度”。
+分支 A：参数化证据 (Parametric Evidence)
+利用 ResNet/ViT 的 Logits 直接映射为证据向量。
+● 公式：
+
+● 解释：  代表神经网络“凭经验”认为样本属于第  类的证据量。
+分支 B：非参数化证据 (Non-Parametric Evidence)
+基于 Module 1 计算出的 Sinkhorn 距离进行证据转换。
+● 检索： 在特征库中检索出与 Query 样本 Sinkhorn 距离最小的 Top- 个邻居。
+● 证据转化： 利用 RBF 核函数将 OT 距离转化为相似度（证据）：
+● 类别聚合：
+
+● 解释： 只有当在训练集中找到结构极其相似的样本（OT 距离小）时，该分支才会提供强证据。否则（如 OOD 样本），证据量趋近于 0。
+
+Module 3: 基于证据理论的不确定性融合 (Uncertainty-Guided Evidential Fusion)
+目标： 使用 Dempster-Shafer (DS) 理论融合两个分支的观点，输出包含“认知不确定性”的最终结果。
+融合逻辑：
+将两个分支视为两个独立的信源，每个信源提供一组信念质量（Belief Mass）：
+● : 对第  类的置信度。
+● : 整体的不确定性 (Uncertainty mass)。
+
+Dempster 组合规则 (Orthogonal Sum):
+融合后的信念质量 ：
+
+核心优势：
+● 冲突处理： 如果 Net 说是猫，OT 说是车，融合结果会降低两者的置信度，并增加不确定性 。
+● 无知处理： 如果 Net 不确定（logits 平坦），OT 也不确定（距离都很远），最终结果  会非常高，明确告知用户“我不知道”。
+
+3. 预期创新点 (Expected Contributions)
+1. 方法论创新： 首次将 Sinkhorn Optimal Transport 引入到测试时（Test-Time）分类增强任务中，作为 k-NN 的度量基础，解决了高维特征对齐难题。
+2. 理论框架创新： 构建了一个端到端的 Evidence-based Inference 框架，将传统的 Softmax 概率融合升级为基于 DS 理论的信念融合，填补了参数化与非参数化模型在可信计算领域融合的空白。
+3. 实际性能： 预期在**噪声干扰（Corrupted Data）和分布外检测（OOD Detection）**任务上，显著优于现有的 Baseline（如纯 Softmax 或 简单的 Softmax+kNN 加权）。
+
+4. 实验计划 (Experimental Plan)
+4.1 数据集
+● In-Distribution: CIFAR-10, CIFAR-100, ImageNet-100。
+● Out-of-Distribution (用于测试不确定性): SVHN, LSUN, Gaussian Noise。
+4.2 对比基线 (Baselines)
+● Standard ResNet/ViT (Cross Entropy)。
+● Deep k-NN (Standard Euclidean Distance)。
+● DDU (Deep Deterministic Uncertainty)。
+● Mahalanobis Distance based detector。
+4.3 核心实验与指标
+1. 分类准确率 (Accuracy): 验证 OT-kNN 融合是否提升了 ID 数据的准确性。
+2. 不确定性校准 (Calibration): 使用 ECE (Expected Calibration Error) 指标，验证输出概率是否真实的反映了准确率。
+3. OOD 检测能力: 使用 AUROC 指标，评估模型区分 ID 样本和 OOD 样本的能力（基于输出的  值）。
+4. 鲁棒性分析: 在 CIFAR-10-C (Corrupted) 数据集上测试，验证 OT 度量对抗图像畸变的能力。
+
+5. 可行性分析 (Feasibility)
+● 计算代价： Sinkhorn 算法虽然比欧氏距离慢，但可以通过 Coarse-to-Fine 策略优化（先用欧氏距离筛选 Top-50，再用 OT 精排），满足实时性要求。
+● 代码实现： PyTorch 配合 POT (Python Optimal Transport) 库可快速实现核心算法。

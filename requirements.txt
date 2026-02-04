@@ -1,0 +1,6 @@
+# torch and torchvision are provided by conda env 'zxc'
+numpy
+pot
+scikit-learn
+tqdm
+matplotlib

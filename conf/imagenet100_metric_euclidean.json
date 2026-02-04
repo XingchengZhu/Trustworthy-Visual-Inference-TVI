@@ -13,5 +13,6 @@
     "sinkhorn_max_iter": 100,
     "k_neighbors": 10,
     "evidence_scale": 1.0,
-    "rbf_gamma": 1.0
+    "rbf_gamma": 1.0,
+    "metric_type": "euclidean"
 }

@@ -1,9 +1,9 @@
 {
-    "dataset_name": "cifar10",
+    "dataset_name": "svhn",
     "num_classes": 10,
     "batch_size": 128,
     "epochs": 100,
-    "lr": 0.1,
+    "lr": 0.01,
     "momentum": 0.9,
     "weight_decay": 0.0005,
     "num_support_samples": 1000,

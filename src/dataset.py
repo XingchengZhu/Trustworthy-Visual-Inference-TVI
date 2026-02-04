@@ -93,6 +93,21 @@ def get_dataloaders():
         support_dataset = datasets.ImageFolder(train_dir, transform=transform_test)
         test_dataset = datasets.ImageFolder(val_dir, transform=transform_test)
         
+    elif Config.DATASET_NAME == 'svhn':
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970)),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970)),
+        ])
+        
+        train_dataset = datasets.SVHN(root=Config.DATA_DIR, split='train', download=True, transform=transform_train)
+        test_dataset = datasets.SVHN(root=Config.DATA_DIR, split='test', download=True, transform=transform_test)
+        support_dataset = datasets.SVHN(root=Config.DATA_DIR, split='train', download=True, transform=transform_test)
+
     else:
         raise ValueError(f"Unknown Dataset: {Config.DATASET_NAME}")
 

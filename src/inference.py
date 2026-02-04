@@ -96,7 +96,7 @@ def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
     plt.savefig(os.path.join(results_dir, 'uncertainty_distribution.png'))
     plt.close()
 
-def evaluate(model, test_loader, support_features, support_labels, device, logger):
+def evaluate(model, test_loader, support_features, support_labels, device, logger, args):
     ot_metric = OTMetric(device)
     evidence_extractor = EvidenceExtractor(num_classes=Config.NUM_CLASSES)
     fusion_module = DempsterShaferFusion(num_classes=Config.NUM_CLASSES)
@@ -122,7 +122,7 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     # Metrics for Plots
     all_correct_fusion = [] # Boolean mask for ID
     
-    logger.info("Starting ID Inference...")
+    logger.info(f"Starting ID Inference... (Baseline Mode: {args.baseline})")
     with torch.no_grad():
         for images, labels in tqdm(test_loader, desc="Inference"):
             images, labels = images.to(device), labels.to(device)
@@ -134,14 +134,42 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
             evidence_param = evidence_extractor.get_parametric_evidence(logits)
             alpha_param = evidence_param + 1
             
-            # 3. Non-Parametric
-            ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
-            evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
-            alpha_nonparam = evidence_nonparam + 1
+            # Branch Uncertainties
+            S_param = torch.sum(alpha_param, dim=1)
+            u_param = Config.NUM_CLASSES / S_param
+            _, pred_param = torch.max(alpha_param, 1)
+
+            # Initialize other variables with defaults
+            alpha_nonparam = torch.ones_like(alpha_param) # Dummy
+            alpha_fuse = alpha_param # In baseline, fusion = param
+            u_nonparam = torch.zeros_like(u_param)
+            u_fuse = u_param
+            C_fuse = torch.zeros_like(u_param)
+            pred_nonparam = pred_param # Dummy
+            pred_fuse = pred_param
+            min_ot_dist = torch.zeros_like(u_param)
+            confidence = torch.max(alpha_param / S_param.unsqueeze(1), 1)[0]
             
-            # 4. Fusion
-            # Now fusion returns (alpha, u, C)
-            alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+            if not args.baseline:
+                # 3. Non-Parametric
+                ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
+                evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
+                alpha_nonparam = evidence_nonparam + 1
+                
+                # 4. Fusion
+                # Now fusion returns (alpha, u, C)
+                alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+                
+                # Update vars
+                S_nonparam = torch.sum(alpha_nonparam, dim=1)
+                u_nonparam = Config.NUM_CLASSES / S_nonparam
+                
+                _, pred_nonparam = torch.max(alpha_nonparam, 1)
+                _, pred_fuse = torch.max(alpha_fuse, 1)
+                probs_fuse = alpha_fuse / torch.sum(alpha_fuse, dim=1, keepdim=True)
+                confidence, _ = torch.max(probs_fuse, 1)
+                
+                min_ot_dist = ot_dists[:, 0]
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -160,7 +188,10 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
             confidence, _ = torch.max(probs_fuse, 1)
             
             # Min OT Distance (First neighbor)
-            min_ot_dist = ot_dists[:, 0]
+            if not args.baseline:
+                min_ot_dist = ot_dists[:, 0]
+            else:
+                min_ot_dist = torch.zeros(images.size(0)).to(device)
             
             # Update Counters
             total += labels.size(0)
@@ -266,22 +297,37 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
                     alpha_param = evidence_param + 1
                     
-                    ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
-                    evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
-                    alpha_nonparam = evidence_nonparam + 1
+                    # Defaults
+                    alpha_nonparam = torch.ones_like(alpha_param)
+                    alpha_fuse = alpha_param
+                    u_nonparam = torch.zeros(images.size(0)).to(device)
+                    u_fuse = Config.NUM_CLASSES / torch.sum(alpha_param, dim=1) # Default to param U
+                    C_fuse = torch.zeros_like(u_fuse)
+                    min_ot_dist = torch.zeros_like(u_fuse)
                     
-                    alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+                    if not args.baseline:
+                        ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
+                        evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
+                        alpha_nonparam = evidence_nonparam + 1
+                        
+                        alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+                        min_ot_dist = ot_dists[:, 0]
                     
                     # Branch Uncertainties
                     S_param = torch.sum(alpha_param, dim=1)
                     u_param = Config.NUM_CLASSES / S_param
-                    S_nonparam = torch.sum(alpha_nonparam, dim=1)
-                    u_nonparam = Config.NUM_CLASSES / S_nonparam
+                    if not args.baseline:
+                         S_nonparam = torch.sum(alpha_nonparam, dim=1)
+                         u_nonparam = Config.NUM_CLASSES / S_nonparam
                     
                     probs = alpha_fuse / torch.sum(alpha_fuse, dim=1, keepdim=True)
                     conf, preds = torch.max(probs, 1)
                     
-                    min_ot_dist = ot_dists[:, 0]
+                    if not args.baseline:
+                        min_ot_dist = ot_dists[:, 0]
+                    else:
+                        min_ot_dist = torch.zeros(images.size(0)).to(device)
+
                     
                     # Collect
                     ood_u_fuse.extend(u_fuse.cpu().numpy())
@@ -341,7 +387,9 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
              "metric": Config.METRIC_TYPE,
              "fusion": Config.FUSION_TYPE,
              "k_neighbors": Config.K_NEIGHBORS,
-             "sinkhorn_eps": Config.SINKHORN_EPS
+             "sinkhorn_eps": Config.SINKHORN_EPS,
+             "rbf_gamma": Config.RBF_GAMMA,
+             "support_size": Config.NUM_SUPPORT_SAMPLES
         },
         "accuracy_parametric": float(acc_param),
         "accuracy_nonparametric": float(acc_nonparam),
@@ -361,9 +409,9 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     df_detailed = pd.DataFrame(detailed_logs)
     
     # Prepare Summary DataFrame (Sheet 2)
-    # Flatten ood_results for the table
     summary_data = {
         "Dataset": [Config.DATASET_NAME],
+        "Task Note": [args.task_note],
         "Acc Param": [acc_param],
         "Acc OT": [acc_nonparam],
         "Acc Fusion": [acc_fuse],
@@ -383,17 +431,6 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     
     excel_path = os.path.join(results_dir, "analysis_report.xlsx")
     
-    # Check if exists to append to Summary
-    if os.path.exists(excel_path):
-        try:
-            with pd.ExcelWriter(excel_path, mode='a', if_sheet_exists='overlay') as writer:
-                # We want to append to 'Summary Metrics'
-                # But pandas ExcelWriter append is tricky. 
-                # Easier to load existing summary, concat, and rewrite.
-                pass
-        except:
-             pass
-    
     # Robust Append Strategy: Load -> Concat -> Write
     existing_summary = pd.DataFrame()
     if os.path.exists(excel_path):
@@ -406,29 +443,52 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
             
     if not existing_summary.empty:
         # Check if this config already exists? Or just append.
-        # Let's just append for history.
         df_summary = pd.concat([existing_summary, df_summary], ignore_index=True)
         
-    with pd.ExcelWriter(excel_path, mode='w') as writer: # 'w' overwrittes file, so we must write Detailed too
+    with pd.ExcelWriter(excel_path, mode='w') as writer:
+        # If detailed analysis is huge, maybe skip it if user said it's redundant? 
+        # User said "is detailed_analysis.csv a subset... if so remove". 
+        # But here we are saving to Excel Sheet 1. 
+        # The user said "detailed_analysis.csv ... redundancy... remove".
+        # So I will KEEP the Excel Sheet 1 (Detailed Samples) but NOT save the CSV file.
         df_detailed.to_excel(writer, sheet_name='Detailed Samples', index=False)
         df_summary.to_excel(writer, sheet_name='Summary Metrics', index=False)
         
     logger.info(f"Saved analysis report to {excel_path}")
     
-    # Also save detailed CSV as before for backward compat
-    df_detailed.to_csv(os.path.join(results_dir, "detailed_analysis.csv"), index=False)
-    logger.info(f"Saved detailed analysis to {os.path.join(results_dir, 'detailed_analysis.csv')}")
-    
+    # Removed separate CSV export as per user request
+    # df_detailed.to_csv(...) 
+
     # Plot (Use last OOD, likely Noise)
-    plot_inference_metrics(id_uncertainties_fuse, all_correct_fusion, last_ood_uncertainties)
+    if not args.baseline:
+         plot_inference_metrics(id_uncertainties_fuse, all_correct_fusion, last_ood_uncertainties)
 
 def main():
     parser = argparse.ArgumentParser(description="Run TVI Inference")
     parser.add_argument("--config", type=str, default="conf/cifar10.json", help="Path to config file")
+    parser.add_argument("--task_note", type=str, default="Base", help="Note for the experiment (e.g. Ablation, Baseline)")
+    parser.add_argument("--baseline", action="store_true", help="Run in baseline mode (only Parametric branch, skip OT/Fusion)")
+    
+    # Ablation / Sensitivity Overrides
+    parser.add_argument("--k_neighbors", type=int, default=None, help="Override K Neighbors")
+    parser.add_argument("--rbf_gamma", type=float, default=None, help="Override RBF Gamma")
+    parser.add_argument("--sinkhorn_eps", type=float, default=None, help="Override Sinkhorn Epsilon")
+    parser.add_argument("--fusion_type", type=str, default=None, help="Override Fusion Type")
+    parser.add_argument("--metric_type", type=str, default=None, help="Override Metric Type")
+    parser.add_argument("--support_size", type=int, default=None, help="Override Support Set Size")
+    
     args = parser.parse_args()
     
     # Load Config
     Config.load_config(args.config)
+    
+    # Apply Overrides
+    if args.k_neighbors is not None: Config.K_NEIGHBORS = args.k_neighbors
+    if args.rbf_gamma is not None: Config.RBF_GAMMA = args.rbf_gamma
+    if args.sinkhorn_eps is not None: Config.SINKHORN_EPS = args.sinkhorn_eps
+    if args.fusion_type is not None: Config.FUSION_TYPE = args.fusion_type
+    if args.metric_type is not None: Config.METRIC_TYPE = args.metric_type
+    if args.support_size is not None: Config.NUM_SUPPORT_SAMPLES = args.support_size
     
     # Set Seeds for Reproducibility
     torch.manual_seed(Config.SEED)
@@ -450,6 +510,8 @@ def main():
     logger.info(f"Fusion: {Config.FUSION_TYPE}")
     logger.info(f"K Neighbors: {Config.K_NEIGHBORS}")
     logger.info(f"Sinkhorn Eps: {Config.SINKHORN_EPS}")
+    logger.info(f"RBF Gamma: {Config.RBF_GAMMA}")
+    logger.info(f"Support Size: {Config.NUM_SUPPORT_SAMPLES}")
     logger.info(f"Seed: {Config.SEED}")
     logger.info("="*30)
     
@@ -463,7 +525,8 @@ def main():
     support_features, support_labels = build_support_set(model, support_loader, device, logger)
     
     # Run Evaluation
-    evaluate(model, test_loader, support_features, support_labels, device, logger)
+    # Run Evaluation
+    evaluate(model, test_loader, support_features, support_labels, device, logger, args)
 
 if __name__ == "__main__":
     main()

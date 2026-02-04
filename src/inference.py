@@ -4,14 +4,14 @@ import os
 import time
 from tqdm import tqdm
 from src.config import Config
-from src.dataset import get_dataloaders
+from src.dataset import get_dataloaders, get_ood_loader
 from src.model import ResNet18Backbone
 from src.ot_module import OTMetric
 from src.evidence_module import EvidenceExtractor
 from src.fusion_module import DempsterShaferFusion
 from src.utils import setup_logger, save_results, compute_ece, compute_auroc
 import matplotlib.pyplot as plt
-
+import pandas as pd
 import argparse
 
 def load_backbone(device, logger):
@@ -27,6 +27,13 @@ def load_backbone(device, logger):
     return model
 
 def build_support_set(model, support_loader, device, logger):
+    support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
+    
+    if os.path.exists(support_path):
+        logger.info(f"Loading cached support set from {support_path}")
+        data = torch.load(support_path, map_location=device)
+        return data['features'], data['labels']
+
     logger.info("Building Support Set Features...")
     support_features = []
     support_labels = []
@@ -53,10 +60,15 @@ def build_support_set(model, support_loader, device, logger):
     support_labels = torch.tensor(support_labels).to(device)
     
     logger.info(f"Support Set Created. Shape: {support_features.shape}")
+    
+    # Cache support set
+    torch.save({'features': support_features, 'labels': support_labels}, support_path)
+    logger.info(f"Saved support set to {support_path}")
+    
     return support_features, support_labels
 
 def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
-    uncertainties = np.array(uncertainties)
+    uncertainties = np.array(uncertainties).flatten()
     correct_mask = np.array(correct_mask)
     
     u_correct = uncertainties[correct_mask]
@@ -67,7 +79,8 @@ def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
     plt.hist(u_incorrect, bins=30, alpha=0.5, label='ID Incorrect', density=True, color='red')
     
     if ood_uncertainties is not None:
-         plt.hist(ood_uncertainties, bins=30, alpha=0.5, label='OOD (Noise)', density=True, color='blue')
+         ood_arr = np.array(ood_uncertainties).flatten()
+         plt.hist(ood_arr, bins=30, alpha=0.5, label='OOD (Noise)', density=True, color='blue')
          
     plt.title(f'Uncertainty Distribution ({Config.DATASET_NAME})')
     plt.xlabel('Uncertainty (Entropy / Mass)')
@@ -94,11 +107,20 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     total = 0
     total_uncertainty = 0.0
     
-    # Storage for metrics
-    all_uncertainties = []
-    all_correct_fusion = []
+    # ID Metric Storage
+    id_uncertainties_fuse = []
+    id_uncertainties_param = []
+    id_uncertainties_nonparam = []
+    
+    # Detailed Logs container
+    detailed_logs = []
+    
+    # ID Probs for ECE
     all_probs_fusion = []
-    all_labels = []
+    all_labels_tensor = []
+    
+    # Metrics for Plots
+    all_correct_fusion = [] # Boolean mask for ID
     
     logger.info("Starting ID Inference...")
     with torch.no_grad():
@@ -118,40 +140,68 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
             alpha_nonparam = evidence_nonparam + 1
             
             # 4. Fusion
-            alpha_fuse, u_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+            # Now fusion returns (alpha, u, C)
+            alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+            
+            # Calculate uncertainties for branches (Entroy or similar)
+            # Parametric U: num_classes / sum(alpha)
+            S_param = torch.sum(alpha_param, dim=1)
+            u_param = Config.NUM_CLASSES / S_param
+            
+            # NonParam U: num_classes / sum(alpha)
+            S_nonparam = torch.sum(alpha_nonparam, dim=1)
+            u_nonparam = Config.NUM_CLASSES / S_nonparam
             
             # Predictions
             _, pred_param = torch.max(alpha_param, 1)
             _, pred_nonparam = torch.max(alpha_nonparam, 1)
             _, pred_fuse = torch.max(alpha_fuse, 1)
-            
-            # Uncertainty & Probs
-            # Prob = alpha / sum(alpha)
             probs_fuse = alpha_fuse / torch.sum(alpha_fuse, dim=1, keepdim=True)
+            confidence, _ = torch.max(probs_fuse, 1)
             
+            # Min OT Distance (First neighbor)
+            min_ot_dist = ot_dists[:, 0]
+            
+            # Update Counters
             total += labels.size(0)
             correct_param += (pred_param == labels).sum().item()
             correct_nonparam += (pred_nonparam == labels).sum().item()
             correct_fusion += (pred_fuse == labels).sum().item()
             total_uncertainty += u_fuse.sum().item()
             
-            all_uncertainties.extend(u_fuse.flatten().cpu().numpy())
-            all_correct_fusion.extend((pred_fuse == labels).cpu().numpy())
+            # Store ID Metrics
+            id_uncertainties_fuse.extend(u_fuse.cpu().numpy())
+            id_uncertainties_param.extend(u_param.cpu().numpy())
+            id_uncertainties_nonparam.extend(u_nonparam.cpu().numpy())
+            
             all_probs_fusion.append(probs_fuse)
-            all_labels.append(labels)
+            all_labels_tensor.append(labels)
+            all_correct_fusion.extend((pred_fuse == labels).cpu().numpy())
             
-            # Limit for demo speed if needed
-            # if total >= 500: break
-            
+            # Log Sample Details
+            for i in range(images.size(0)):
+                detailed_logs.append({
+                    "dataset_source": "ID",
+                    "true_label": labels[i].item(),
+                    "pred_label": pred_fuse[i].item(),
+                    "is_correct": bool(pred_fuse[i].item() == labels[i].item()),
+                    "uncertainty_fuse": u_fuse[i].item(),
+                    "uncertainty_param": u_param[i].item(),
+                    "uncertainty_ot": u_nonparam[i].item(),
+                    "conflict": C_fuse[i].item(),
+                    "confidence": confidence[i].item(),
+                    "min_ot_dist": min_ot_dist[i].item()
+                })
+
     # Concatenate Probs
     all_probs_fusion = torch.cat(all_probs_fusion)
-    all_labels = torch.cat(all_labels)
+    all_labels_tensor = torch.cat(all_labels_tensor)
     
     # Compute Metrics
     acc_param = 100 * correct_param / total
     acc_nonparam = 100 * correct_nonparam / total
     acc_fuse = 100 * correct_fusion / total
-    ece_score = compute_ece(all_probs_fusion, all_labels)
+    ece_score = compute_ece(all_probs_fusion, all_labels_tensor)
     
     logger.info(f"Parametric Acc: {acc_param:.2f}%")
     logger.info(f"Non-Parametric Acc: {acc_nonparam:.2f}%")
@@ -159,54 +209,145 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     logger.info(f"ECE Score: {ece_score:.4f}")
     
     # -----------------------
-    # OOD Simulation (Noise)
+    # OOD Evaluation
     # -----------------------
-    logger.info("Starting OOD (Noise) Inference...")
-    ood_uncertainties = []
-    num_ood = 500  # Number of noise samples
+    # Define OOD datasets to test based on current dataset
+    ood_datasets = []
+    if Config.DATASET_NAME == 'cifar10':
+        ood_datasets = ['svhn', 'cifar100']
+    elif Config.DATASET_NAME == 'cifar100':
+        ood_datasets = ['svhn', 'cifar10']
     
-    with torch.no_grad():
-        # Generate Gaussian noise
-        noise_images = torch.randn(num_ood, 3, 32, 32).to(device)
-        
-        # Backbone
-        features, logits = model(noise_images)
-        
-        # Parametric
-        evidence_param = evidence_extractor.get_parametric_evidence(logits)
-        alpha_param = evidence_param + 1
-        
-        # Non-Parametric (OT)
-        ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
-        evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
-        alpha_nonparam = evidence_nonparam + 1
-        
-        # Fusion
-        _, u_fuse_ood = fusion_module.ds_combination(alpha_param, alpha_nonparam)
-        ood_uncertainties.extend(u_fuse_ood.flatten().cpu().numpy())
-        
-    auroc = compute_auroc(np.array(all_uncertainties), np.array(ood_uncertainties))
-    logger.info(f"OOD AUROC (vs Gaussian Noise): {auroc:.4f}")
+    # Always keeping Noise for sanity check
+    ood_datasets.append('noise')
     
+    ood_results = {}
+    
+    # Store last OOD uncertainties for plotting (Noise usually)
+    last_ood_uncertainties = None
+
+    for ood_name in ood_datasets:
+        logger.info(f"Starting OOD ({ood_name}) Inference...")
+        
+        ood_u_fuse = []
+        ood_u_param = []
+        ood_u_nonparam = []
+        
+        current_ood_loop_func = None
+        
+        if ood_name == 'noise':
+            # Generator wrapper
+            def noise_gen():
+                num_ood = 500
+                with torch.no_grad():
+                    noise_images = torch.randn(num_ood, 3, 32, 32).to(device)
+                    # Fake labels -1 for OOD
+                    fake_labels = torch.full((num_ood,), -1, dtype=torch.long).to(device)
+                    yield noise_images, fake_labels
+            current_ood_loop_func = noise_gen
+        else:
+            def loader_gen():
+                loader = get_ood_loader(ood_name)
+                max_samples = 500
+                cnt = 0
+                for img, lbl in loader:
+                    if cnt >= max_samples: break
+                    # Force labels to -1 for OOD
+                    lbl = torch.full_like(lbl, -1)
+                    yield img.to(device), lbl.to(device)
+                    cnt += img.size(0)
+            current_ood_loop_func = loader_gen
+
+        try:
+            with torch.no_grad():
+                for images, labels in current_ood_loop_func():
+                    features, logits = model(images)
+                    
+                    evidence_param = evidence_extractor.get_parametric_evidence(logits)
+                    alpha_param = evidence_param + 1
+                    
+                    ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
+                    evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
+                    alpha_nonparam = evidence_nonparam + 1
+                    
+                    alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+                    
+                    # Branch Uncertainties
+                    S_param = torch.sum(alpha_param, dim=1)
+                    u_param = Config.NUM_CLASSES / S_param
+                    S_nonparam = torch.sum(alpha_nonparam, dim=1)
+                    u_nonparam = Config.NUM_CLASSES / S_nonparam
+                    
+                    probs = alpha_fuse / torch.sum(alpha_fuse, dim=1, keepdim=True)
+                    conf, preds = torch.max(probs, 1)
+                    
+                    min_ot_dist = ot_dists[:, 0]
+                    
+                    # Collect
+                    ood_u_fuse.extend(u_fuse.cpu().numpy())
+                    ood_u_param.extend(u_param.cpu().numpy())
+                    ood_u_nonparam.extend(u_nonparam.cpu().numpy())
+                    
+                    # Log Sample Details
+                    for i in range(images.size(0)):
+                        detailed_logs.append({
+                            "dataset_source": ood_name,
+                            "true_label": -1, # OOD
+                            "pred_label": preds[i].item(),
+                            "is_correct": False,
+                            "uncertainty_fuse": u_fuse[i].item(),
+                            "uncertainty_param": u_param[i].item(),
+                            "uncertainty_ot": u_nonparam[i].item(),
+                            "conflict": C_fuse[i].item(),
+                            "confidence": conf[i].item(),
+                            "min_ot_dist": min_ot_dist[i].item()
+                        })
+
+            # Compute AUROC for all branches (Ablation)
+            auroc_fuse = compute_auroc(np.array(id_uncertainties_fuse), np.array(ood_u_fuse))
+            auroc_param = compute_auroc(np.array(id_uncertainties_param), np.array(ood_u_param))
+            auroc_nonparam = compute_auroc(np.array(id_uncertainties_nonparam), np.array(ood_u_nonparam))
+            
+            logger.info(f"OOD {ood_name} Results:")
+            logger.info(f"  AUROC (Fusion): {auroc_fuse:.4f}")
+            logger.info(f"  AUROC (Param): {auroc_param:.4f}")
+            logger.info(f"  AUROC (OT):    {auroc_nonparam:.4f}")
+
+            ood_results[ood_name] = {
+                "auroc_fusion": float(auroc_fuse),
+                "auroc_parametric": float(auroc_param),
+                "auroc_nonparametric": float(auroc_nonparam)
+            }
+            
+            last_ood_uncertainties = ood_u_fuse
+
+        except Exception as e:
+            logger.error(f"Failed OOD {ood_name}: {e}")
+
     # Save Results
     results = {
         "dataset": Config.DATASET_NAME,
-        "accuracy_parametric": acc_param,
-        "accuracy_nonparametric": acc_nonparam,
-        "accuracy_fusion": acc_fuse,
-        "ece": ece_score,
-        "auroc_ood": auroc,
-        "avg_uncertainty_id": total_uncertainty / total,
-        "avg_uncertainty_ood": np.mean(ood_uncertainties)
+        "accuracy_parametric": float(acc_param),
+        "accuracy_nonparametric": float(acc_nonparam),
+        "accuracy_fusion": float(acc_fuse),
+        "ece": float(ece_score),
+        "auroc_ood": ood_results, # Nested dict
+        "avg_uncertainty_id": float(total_uncertainty / total),
     }
+    
     results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
     if not os.path.exists(results_dir):
          os.makedirs(results_dir)
          
     save_results(results, results_dir, filename="metrics.json")
     
-    # Plot
-    plot_inference_metrics(all_uncertainties, all_correct_fusion, ood_uncertainties)
+    # Save Detailed Logs
+    df = pd.DataFrame(detailed_logs)
+    df.to_csv(os.path.join(results_dir, "detailed_analysis.csv"), index=False)
+    logger.info(f"Saved detailed analysis to {os.path.join(results_dir, 'detailed_analysis.csv')}")
+    
+    # Plot (Use last OOD, likely Noise)
+    plot_inference_metrics(id_uncertainties_fuse, all_correct_fusion, last_ood_uncertainties)
 
 def main():
     parser = argparse.ArgumentParser(description="Run TVI Inference")
@@ -215,6 +356,12 @@ def main():
     
     # Load Config
     Config.load_config(args.config)
+    
+    # Set Seeds for Reproducibility
+    torch.manual_seed(Config.SEED)
+    np.random.seed(Config.SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(Config.SEED)
     
     results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
     if not os.path.exists(results_dir):

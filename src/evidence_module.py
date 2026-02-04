@@ -29,7 +29,7 @@ class EvidenceExtractor:
         
         # RBF Kernel conversion: s = exp(-gamma * d)
         # Gamma parameter tuning is important.
-        gamma = 1.0 
+        gamma = Config.RBF_GAMMA 
         
         # Convert distances to similarity/affinity
         # ot_distances is numpy array from previous step usually, let's ensure tensor

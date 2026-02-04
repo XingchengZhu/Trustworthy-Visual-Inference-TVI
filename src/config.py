@@ -31,6 +31,7 @@ class Config:
     
     # Evidence
     EVIDENCE_SCALE = 1.0
+    RBF_GAMMA = 1.0
 
     @classmethod
     def load_config(cls, config_path):

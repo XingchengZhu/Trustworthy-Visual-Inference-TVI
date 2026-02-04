@@ -72,4 +72,4 @@ class DempsterShaferFusion:
         S_fuse = self.num_classes / (u_fuse + 1e-8)
         alpha_fuse = b_fuse * S_fuse + 1
         
-        return alpha_fuse, u_fuse
+        return alpha_fuse, u_fuse, C

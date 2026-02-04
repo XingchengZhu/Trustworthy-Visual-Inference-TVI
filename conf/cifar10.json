@@ -10,5 +10,6 @@
     "sinkhorn_eps": 0.1,
     "sinkhorn_max_iter": 100,
     "k_neighbors": 5,
-    "evidence_scale": 1.0
+    "evidence_scale": 1.0,
+    "rbf_gamma": 1.0
 }

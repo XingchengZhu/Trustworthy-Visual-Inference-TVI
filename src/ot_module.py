@@ -7,99 +7,127 @@ class OTMetric:
     def __init__(self, device='cpu'):
         self.device = device
         
-    def compute_sinkhorn_distance(self, feature_map_a, feature_map_b):
-        """
-        Computes Sinkhorn distance between two feature maps.
-        feature_map_a: (C, H, W) -> (C, N) where N=H*W
-        feature_map_b: (C, H, W) -> (C, N)
-        """
-        # Flatten spatial dimensions: (C, H, W) -> (N, C) so each row is a feature vector
-        # Note: Input shape handling. The model returns (B, 512, 4, 4).
-        # We assume this function handles a single pair or batched pair. 
-        # For simplicity in this demo, let's assume single pair inputs (C, H, W).
-        
-        # Reshape to (N, C)
-        fa = feature_map_a.reshape(feature_map_a.shape[0], -1).T # (16, 512)
-        fb = feature_map_b.reshape(feature_map_b.shape[0], -1).T # (16, 512)
-        
-        # Normalize features?
-        # fa = torch.nn.functional.normalize(fa, dim=1)
-        # fb = torch.nn.functional.normalize(fb, dim=1)
-        
-        # Cost Matrix: Cosine distance usually preferred, or Euclidean.
-        # Plan says "Cosine distance"
-        # M = 1 - CosineSimilarity(fa, fb)
-        
-        # Using Euclidean for generic OT usually works well too, but let's stick to plan if possible.
-        # pot.dist calculates squared euclidean distance by default.
-        # For cosine: 1 - A.B / (|A||B|)
-        
-        # Let's convert to numpy for POT
-        fa_np = fa.detach().cpu().numpy().astype(np.float64)
-        fb_np = fb.detach().cpu().numpy().astype(np.float64)
-        
-        # Normalize to ensure stability
-        fa_np /= (np.linalg.norm(fa_np, axis=1, keepdims=True) + 1e-8)
-        fb_np /= (np.linalg.norm(fb_np, axis=1, keepdims=True) + 1e-8)
-        
-        # Cost matrix: 1 - cosine similarity
-        M = 1 - np.dot(fa_np, fb_np.T)
-        
-        # Distribution weights: Uniform
-        n_a = fa_np.shape[0]
-        n_b = fb_np.shape[0]
-        a = np.ones((n_a,)) / n_a
-        b = np.ones((n_b,)) / n_b
-        
-        # Sinkhorn
-        # reg is lambda/entropy parameter. 
-        distance = ot.sinkhorn2(a, b, M, reg=Config.SINKHORN_EPS, numItermax=Config.SINKHORN_MAX_ITER)
-        
-        # ot.sinkhorn2 returns a scalar (float) or array depending on input.
-        # Here we have single inputs so it returns a scalar float/tensor
-        return distance
-
     def compute_batch_ot(self, query_features, support_features, support_labels):
         """
+        Computes OT distances in batch mode on GPU.
+        
         query_features: (B, C, H, W)
         support_features: (S, C, H, W)
         support_labels: (S,)
         
-        Returns: Evidence vector (B, NumClasses) based on OT distances
+        Returns: distances (B, K), topk_indices (B, K)
         """
-        # This is computationally expensive.
-        # Strategy:
-        # 1. Avg Pooling for Coarse Filtering (Euclidean/Cosine) -> Top K candidates
-        # 2. Fine-grained OT on Top K
+        B, C, H, W = query_features.shape
+        S = support_features.shape[0]
+        N = H * W
         
-        B = query_features.size(0)
-        S = support_features.size(0)
+        # 1. Prepare Features
+        # Flatten spatial dims: (B, C, H, W) -> (B, C, N) -> (B, N, C) 
+        # (Pixel as sample, Channel as feature)
+        # Verify shape assumption: Cost is between pixels (N x N). Features are C-dim vectors.
+        q_flat = query_features.view(B, C, N).permute(0, 2, 1) # (B, N, C)
+        s_flat = support_features.view(S, C, N).permute(0, 2, 1) # (S, N, C)
         
-        # Coarse step
-        q_avg = torch.mean(query_features, dim=[2, 3]) # (B, C)
-        s_avg = torch.mean(support_features, dim=[2, 3]) # (S, C)
+        # Normalize for Cosine Distance
+        q_norm = torch.nn.functional.normalize(q_flat, dim=2)
+        s_norm = torch.nn.functional.normalize(s_flat, dim=2)
         
-        q_avg = torch.nn.functional.normalize(q_avg, dim=1)
+        # 2. Coarse Filtering (Euclidean/Cosine on Global Avg Pool)
+        # GAP: (B, C, H, W) -> (B, C)
+        q_avg = torch.mean(query_features, dim=[2, 3]) 
+        s_avg = torch.mean(support_features, dim=[2, 3])
+        
+        q_avg = torch.nn.functional.normalize(q_avg, dim=1) 
         s_avg = torch.nn.functional.normalize(s_avg, dim=1)
         
-        # Similarity matrix (B, S)
-        sim = torch.mm(q_avg, s_avg.T) 
+        # Sim Matrix: (B, S)
+        sim_coarse = torch.mm(q_avg, s_avg.T)
         
-        # Select Top K
+        # Top K
         k = min(Config.K_NEIGHBORS, S)
-        topk_vals, topk_indices = torch.topk(sim, k, dim=1) # (B, K)
+        _, topk_indices = torch.topk(sim_coarse, k, dim=1) # (B, K)
         
-        distances = np.zeros((B, k))
+        # 3. Batch Construction for OT
+        # We need to construct B*K pairs.
         
-        # Fine step (Looping for now, can be parallelized but OT is tricky to batch fully efficiently without custom kernel)
-        for i in range(B):
-            q_map = query_features[i]
-            for j in range(k):
-                s_idx = topk_indices[i, j]
-                s_map = support_features[s_idx]
-                
-                # Compute OT
-                dist = self.compute_sinkhorn_distance(q_map, s_map)
-                distances[i, j] = dist
-                
+        # Gather Query: repeat each query K times -> (B, K, N, C)
+        q_batch = q_norm.unsqueeze(1).expand(-1, k, -1, -1) 
+        # Result: (B, K, N, C)
+        
+        # Gather Support: Select topk neighbors -> (B, K, N, C)
+        # s_norm is (S, N, C). indices is (B, K).
+        # We need to index dim 0 of s_norm with indices.
+        # Flatten indices first option or use fancy indexing
+        
+        # Fancy indexing in pytorch:
+        # s_norm[indices] will give (B, K, N, C)
+        s_batch = s_norm[topk_indices] 
+        
+        # Flatten to (B*K, N, C) for batched OT
+        curr_batch_size = B * k
+        q_in = q_batch.reshape(curr_batch_size, N, C)
+        s_in = s_batch.reshape(curr_batch_size, N, C)
+        
+        # 4. Compute Cost Matrix (Cosine Distance)
+        # M = 1 - Q . S^T
+        # Bmm: (B*K, N, C) x (B*K, C, N) -> (B*K, N, N)
+        scores = torch.bmm(q_in, s_in.transpose(1, 2))
+        M = 1 - scores
+        
+        # Ensure M is positive (numerical stability)
+        M = torch.clamp(M, min=0.0)
+        
+        # 5. Solve Sinkhorn with custom PyTorch implementation for Batch support
+        # ot.sinkhorn2 struggles with 3D inputs (Batched M)
+        dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
+        
+        # Output is (B*K,)
+        distances = dist_flat.view(B, k)
+        
         return distances, topk_indices
+
+    def batch_sinkhorn_torch(self, M, reg, numItermax):
+        """
+        PyTorch implementation of Sinkhorn algorithm for batched cost matrices.
+        M: (Batch, N, N)
+        Returns: (Batch,) distances
+        """
+        B, N, _ = M.shape
+        
+        # Uniform marginals
+        a = torch.ones((B, N), device=M.device) / N
+        b = torch.ones((B, N), device=M.device) / N
+        
+        # K = exp(-M / reg)
+        K = torch.exp(-M / reg)
+        
+        # Init u, v
+        u = torch.ones((B, N), device=M.device) / N
+        
+        # Sinkhorn iterations
+        for _ in range(numItermax):
+            # v = b / (K^T @ u)
+            # K is (B, N, N). transpose(1, 2) -> (B, N, N)
+            # u is (B, N). unsqueeze(-1) -> (B, N, 1)
+            # bmm result: (B, N, 1). squeeze -> (B, N)
+            
+            # K.transpose(1, 2) @ u.unsqueeze(2) -> (B, N, 1)
+            Kv = torch.bmm(K.transpose(1, 2), u.unsqueeze(2)).squeeze(2)
+            v = b / (Kv + 1e-8)
+            
+            # u = a / (K @ v)
+            Ku = torch.bmm(K, v.unsqueeze(2)).squeeze(2)
+            u = a / (Ku + 1e-8)
+            
+        # Compute distance
+        # dist = sum(u * (K * M) * v)
+        # K * M -> elementwise
+        # u.unsqueeze(2) * (K*M) * v.unsqueeze(1) -> (B, N, N)
+        
+        # Transport plan P = u.dimshuffle(0,1,x) * K * v.dimshuffle(0,x,1)
+        # P = diag(u) K diag(v)
+        P = u.unsqueeze(2) * K * v.unsqueeze(1)
+        
+        dist = torch.sum(P * M, dim=[1, 2])
+        
+        return dist

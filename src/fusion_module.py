@@ -1,4 +1,5 @@
 import torch
+from src.config import Config
 
 class DempsterShaferFusion:
     def __init__(self, num_classes=10):
@@ -30,6 +31,26 @@ class DempsterShaferFusion:
         u_fuse = (u1 * u2) / (1 - C)
         C = sum_{i!=j} b1_i * b2_j  (Conflict)
         """
+        
+        if Config.FUSION_TYPE == 'average':
+            # Variant A: Simple Average
+            # We average the alphas? Or average the beliefs?
+            # Usually naive fusion averages probability distributions or beliefs.
+            # Let's average the Alphas (Evidence + 1) directly, or Beliefs.
+            
+            # If we average Alphas: alpha_fuse = (alpha1 + alpha2) / 2
+            alpha_fuse = (alpha1 + alpha2) / 2
+            
+            # Recalculate Uncertainty for the fused alpha
+            S_fuse = torch.sum(alpha_fuse, dim=1, keepdim=True)
+            u_fuse = self.num_classes / S_fuse
+            
+            # Conflict is not well defined for Average, but we can return 0 or proxy.
+            C = torch.zeros_like(u_fuse)
+            
+            return alpha_fuse, u_fuse, C
+
+        # Default: Dempster-Shafer
         
         # Calculate belief mass and uncertainty for source 1
         S1 = torch.sum(alpha1, dim=1, keepdim=True)

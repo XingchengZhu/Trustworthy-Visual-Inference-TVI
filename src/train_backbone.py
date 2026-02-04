@@ -5,7 +5,7 @@ from tqdm import tqdm
 import os
 from src.config import Config
 from src.dataset import get_dataloaders
-from src.model import ResNet18Backbone
+from src.model import ResNetBackbone
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
@@ -104,13 +104,18 @@ def main():
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
         
+    from src.utils import setup_logger
+    logger = setup_logger(results_dir, name="experiment")
+    
     device = torch.device(Config.DEVICE)
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
+    logger.info(f"Starting Training on {Config.DATASET_NAME}")
     
     train_loader, _, test_loader = get_dataloaders()
     
     # Use Config.NUM_CLASSES
-    model = ResNet18Backbone(num_classes=Config.NUM_CLASSES).to(device)
+    from src.model import ResNetBackbone
+    model = ResNetBackbone(num_classes=Config.NUM_CLASSES).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=Config.LR, momentum=Config.MOMENTUM, weight_decay=Config.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.EPOCHS)
@@ -132,18 +137,19 @@ def main():
         
         scheduler.step()
         
-        print(f"Epoch {epoch+1}/{Config.EPOCHS} | Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}%")
+        # Log to file
+        logger.info(f"Epoch {epoch+1}/{Config.EPOCHS} | Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}%")
         
         if val_acc > best_acc:
             best_acc = val_acc
             ckpt_name = f"best_resnet18_{Config.DATASET_NAME}.pth"
             torch.save(model.state_dict(), os.path.join(Config.Checkpoints_DIR, ckpt_name))
-            print(f"Model Saved: {ckpt_name}")
+            logger.info(f"Model Saved: {ckpt_name} (New Best Acc/Val: {best_acc:.2f}%)")
             
         # Plot every epoch or so
         plot_metrics(train_losses, train_accs, val_losses, val_accs)
             
-    print(f"Training Complete. Best Accuracy: {best_acc:.2f}%")
+    logger.info(f"Training Complete. Best Accuracy: {best_acc:.2f}%")
 
 if __name__ == "__main__":
     main()

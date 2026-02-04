@@ -5,17 +5,17 @@ import time
 from tqdm import tqdm
 from src.config import Config
 from src.dataset import get_dataloaders, get_ood_loader
-from src.model import ResNet18Backbone
+from src.model import ResNetBackbone
 from src.ot_module import OTMetric
 from src.evidence_module import EvidenceExtractor
 from src.fusion_module import DempsterShaferFusion
-from src.utils import setup_logger, save_results, compute_ece, compute_auroc
+from src.utils import setup_logger, save_results, compute_ece, compute_auroc, compute_fpr95
 import matplotlib.pyplot as plt
 import pandas as pd
 import argparse
 
 def load_backbone(device, logger):
-    model = ResNet18Backbone(num_classes=Config.NUM_CLASSES).to(device)
+    model = ResNetBackbone(num_classes=Config.NUM_CLASSES).to(device)
     ckpt_name = f"best_resnet18_{Config.DATASET_NAME}.pth"
     checkpoint_path = os.path.join(Config.Checkpoints_DIR, ckpt_name)
     if os.path.exists(checkpoint_path):
@@ -308,25 +308,41 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
             auroc_param = compute_auroc(np.array(id_uncertainties_param), np.array(ood_u_param))
             auroc_nonparam = compute_auroc(np.array(id_uncertainties_nonparam), np.array(ood_u_nonparam))
             
+            # Compute FPR@95 for all branches
+            fpr_fuse = compute_fpr95(np.array(id_uncertainties_fuse), np.array(ood_u_fuse))
+            fpr_param = compute_fpr95(np.array(id_uncertainties_param), np.array(ood_u_param))
+            fpr_nonparam = compute_fpr95(np.array(id_uncertainties_nonparam), np.array(ood_u_nonparam))
+            
             logger.info(f"OOD {ood_name} Results:")
-            logger.info(f"  AUROC (Fusion): {auroc_fuse:.4f}")
-            logger.info(f"  AUROC (Param): {auroc_param:.4f}")
-            logger.info(f"  AUROC (OT):    {auroc_nonparam:.4f}")
+            logger.info(f"  AUROC (Fusion): {auroc_fuse:.4f} | FPR@95: {fpr_fuse:.4f}")
+            logger.info(f"  AUROC (Param): {auroc_param:.4f} | FPR@95: {fpr_param:.4f}")
+            logger.info(f"  AUROC (OT):    {auroc_nonparam:.4f} | FPR@95: {fpr_nonparam:.4f}")
 
             ood_results[ood_name] = {
                 "auroc_fusion": float(auroc_fuse),
                 "auroc_parametric": float(auroc_param),
-                "auroc_nonparametric": float(auroc_nonparam)
+                "auroc_nonparametric": float(auroc_nonparam),
+                "fpr95_fusion": float(fpr_fuse),
+                "fpr95_parametric": float(fpr_param),
+                "fpr95_nonparametric": float(fpr_nonparam)
             }
             
             last_ood_uncertainties = ood_u_fuse
 
         except Exception as e:
             logger.error(f"Failed OOD {ood_name}: {e}")
+            import traceback
+            traceback.print_exc()
 
     # Save Results
     results = {
         "dataset": Config.DATASET_NAME,
+        "config": {
+             "metric": Config.METRIC_TYPE,
+             "fusion": Config.FUSION_TYPE,
+             "k_neighbors": Config.K_NEIGHBORS,
+             "sinkhorn_eps": Config.SINKHORN_EPS
+        },
         "accuracy_parametric": float(acc_param),
         "accuracy_nonparametric": float(acc_nonparam),
         "accuracy_fusion": float(acc_fuse),
@@ -341,9 +357,66 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
          
     save_results(results, results_dir, filename="metrics.json")
     
-    # Save Detailed Logs
-    df = pd.DataFrame(detailed_logs)
-    df.to_csv(os.path.join(results_dir, "detailed_analysis.csv"), index=False)
+    # Save Detailed Logs and Summary to Excel
+    df_detailed = pd.DataFrame(detailed_logs)
+    
+    # Prepare Summary DataFrame (Sheet 2)
+    # Flatten ood_results for the table
+    summary_data = {
+        "Dataset": [Config.DATASET_NAME],
+        "Acc Param": [acc_param],
+        "Acc OT": [acc_nonparam],
+        "Acc Fusion": [acc_fuse],
+        "ECE": [ece_score],
+        "Metric": [Config.METRIC_TYPE],
+        "Fusion": [Config.FUSION_TYPE]
+    }
+    
+    # Add OOD metrics dynamically
+    for ood_name, metrics in ood_results.items():
+        summary_data[f"AUROC Fusion ({ood_name})"] = [metrics['auroc_fusion']]
+        summary_data[f"FPR95 Fusion ({ood_name})"] = [metrics['fpr95_fusion']]
+        summary_data[f"AUROC Param ({ood_name})"] = [metrics['auroc_parametric']]
+        summary_data[f"AUROC OT ({ood_name})"] = [metrics['auroc_nonparametric']]
+        
+    df_summary = pd.DataFrame(summary_data)
+    
+    excel_path = os.path.join(results_dir, "analysis_report.xlsx")
+    
+    # Check if exists to append to Summary
+    if os.path.exists(excel_path):
+        try:
+            with pd.ExcelWriter(excel_path, mode='a', if_sheet_exists='overlay') as writer:
+                # We want to append to 'Summary Metrics'
+                # But pandas ExcelWriter append is tricky. 
+                # Easier to load existing summary, concat, and rewrite.
+                pass
+        except:
+             pass
+    
+    # Robust Append Strategy: Load -> Concat -> Write
+    existing_summary = pd.DataFrame()
+    if os.path.exists(excel_path):
+        try:
+            # Read existing summary
+            existing_summary = pd.read_excel(excel_path, sheet_name='Summary Metrics')
+        except:
+            # Maybe sheet doesn't exist
+            pass
+            
+    if not existing_summary.empty:
+        # Check if this config already exists? Or just append.
+        # Let's just append for history.
+        df_summary = pd.concat([existing_summary, df_summary], ignore_index=True)
+        
+    with pd.ExcelWriter(excel_path, mode='w') as writer: # 'w' overwrittes file, so we must write Detailed too
+        df_detailed.to_excel(writer, sheet_name='Detailed Samples', index=False)
+        df_summary.to_excel(writer, sheet_name='Summary Metrics', index=False)
+        
+    logger.info(f"Saved analysis report to {excel_path}")
+    
+    # Also save detailed CSV as before for backward compat
+    df_detailed.to_csv(os.path.join(results_dir, "detailed_analysis.csv"), index=False)
     logger.info(f"Saved detailed analysis to {os.path.join(results_dir, 'detailed_analysis.csv')}")
     
     # Plot (Use last OOD, likely Noise)
@@ -370,6 +443,15 @@ def main():
     logger = setup_logger(results_dir, name="experiment")
     device = torch.device(Config.DEVICE)
     logger.info(f"Using device: {device}")
+    logger.info("="*30)
+    logger.info("Inference Configuration:")
+    logger.info(f"Dataset: {Config.DATASET_NAME}")
+    logger.info(f"Metric: {Config.METRIC_TYPE}")
+    logger.info(f"Fusion: {Config.FUSION_TYPE}")
+    logger.info(f"K Neighbors: {Config.K_NEIGHBORS}")
+    logger.info(f"Sinkhorn Eps: {Config.SINKHORN_EPS}")
+    logger.info(f"Seed: {Config.SEED}")
+    logger.info("="*30)
     
     # Load Data
     _, support_loader, test_loader = get_dataloaders()

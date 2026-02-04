@@ -3,10 +3,18 @@ import json
 import os
 
 class Config:
-    # Defaults
-    DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     SEED = 42
+    DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     
+    # Model Selection
+    # Options: "resnet18", "resnet34", "resnet50", "wide_resnet50_2"
+    BACKBONE = "resnet18" 
+    
+    # Input Size (for first layer modification)
+    # CIFAR: 32, ImageNet: 224
+    IMAGE_SIZE = 32 
+    
+    # Data params   
     # Paths
     Checkpoints_DIR = "checkpoints"
     RESULTS_DIR = "results"
@@ -27,11 +35,17 @@ class Config:
     NUM_SUPPORT_SAMPLES = 1000
     SINKHORN_EPS = 0.1
     SINKHORN_MAX_ITER = 100
+    SINKHORN_EPS = 0.1
+    SINKHORN_MAX_ITER = 100
     K_NEIGHBORS = 5
+    METRIC_TYPE = "sinkhorn" # sinkhorn, euclidean, cosine
     
     # Evidence
     EVIDENCE_SCALE = 1.0
     RBF_GAMMA = 1.0
+    
+    # Fusion
+    FUSION_TYPE = "dempster_shafer" # dempster_shafer, average
 
     @classmethod
     def load_config(cls, config_path):

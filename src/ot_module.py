@@ -77,13 +77,100 @@ class OTMetric:
         # Ensure M is positive (numerical stability)
         M = torch.clamp(M, min=0.0)
         
-        # 5. Solve Sinkhorn with custom PyTorch implementation for Batch support
-        # ot.sinkhorn2 struggles with 3D inputs (Batched M)
-        dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
-        
-        # Output is (B*K,)
-        distances = dist_flat.view(B, k)
-        
+        if Config.METRIC_TYPE == 'sinkhorn':
+            # 5. Solve Sinkhorn with custom PyTorch implementation for Batch support
+            # ot.sinkhorn2 struggles with 3D inputs (Batched M)
+            dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
+            distances = dist_flat.view(B, k)
+            
+        elif Config.METRIC_TYPE == 'euclidean':
+            # M is actually squared euclidean / something if we used cosine logic? No.
+            # M above was calculated as 1 - cosine. Cost Matrix.
+            # If we want Euclidean, we should ignore M construction above?
+            # Or just use the M (Cosine Distance) as the distance directly?
+            # User specifically asked for "Variant A: Euclidean OR Cosine".
+            # My current M is Cosine Distance (1 - sim).
+            # The structure of this method is heavily optimized for Sinkhorn (batch M).
+            
+            # If Metric is Cosine Distance (without OT, just sum or min? No, usually Avg dist or Min dist).
+            # But "OT-based Evidence" usually implies a distribution distance.
+            # If "Euclidean", maybe we just want the distance to the K neighbors?
+            
+            # Let's interpret "Euclidean/Cosine as k-NN distance".
+            # OT computes Earth Mover between Query Distribution and Support Distribution.
+            # If we disable OT, we treat it as simple k-NN.
+            # Usually Evidence = RBF(dist).
+            # If standard k-NN, distance is usually Mean of Distances to K neighbors, or Min.
+            
+            # Let's use Mean Distance to K neighbors as the "No-OT" baseline of "Set Distance".
+            # Reusing M (which is Cost/Distance Matrix).
+            # M: (B*K, N, N). We have pixel-to-pixel costs.
+            # If we don't do OT, how do we aggregate pixel costs?
+            # Default: Mean over pixels.
+            
+            # Dist = Mean(M) over (N, N) ? No, that's just global diff.
+            # Diagonal? No, not aligned.
+            
+            # Wait, if we use Euclidean/Cosine as "Metric", it likely means 
+            # we don't do Sinkhorn on the cost matrix M, but maybe we just sum it?
+            # OR, we define the distance between Image A and Image B differently.
+            # Currently my code decomposes images into N pixels.
+            # OT aligns pixels.
+            
+            # If I use Euclidean, I should probably treat images as vectors.
+            # (B, C, H, W) -> (B, D).
+            # distance(a, b) = ||a - b||.
+            
+            # Let's stick to the prompt's likely intent:
+            # "Why OT? Euclidean doesn't work for deformation."
+            # So I should compute Euclidean distance between the full images.
+            
+            # My current `compute_batch_ot` first finds top-K neighbors using Cosine on GAP.
+            # Then it does fine-grained matching.
+            
+            # If Config.METRIC_TYPE == 'euclidean':
+            # We should probably compute exact Euclidean between Q and S_neighbors.
+            # q_in: (B*K, N, C). s_in: (B*K, N, C).
+            # Euclidean: sum((q - s)^2) per pixel?
+            # No, that requires valid spatial alignment (pixel 1 to pixel 1).
+            # That is exactly what Euclidean assumes (no shuffle).
+            
+            diff = q_in - s_in # (B*K, N, C)
+            dist_sq = torch.sum(diff ** 2, dim=[1, 2]) # Sum over Spatial and Channels
+            distances = torch.sqrt(dist_sq).view(B, k)
+            
+        elif Config.METRIC_TYPE == 'cosine':
+            # Cosine Distance between full feature vectors.
+            # q_in, s_in are normalized per pixel in the preparation steps? 
+            # q_norm in step 1 was normalized on dim=2 (Channels).
+            # q_in is (B*K, N, C).
+            
+            # We want Global Cosine Distance? 
+            # Or just Mean of Pixel Cosine Distances?
+            # M is (B*K, N, N) containing 1 - cos(p_i, p_j).
+            # If we assume no alignment, we compare p_i with p_i.
+            # That corresponds to the diagonal of M.
+            
+            # M_diag = M[:, i, i]
+            # Average diagonal is the mean cosine distance of corresponding pixels.
+            
+            # But M was constructed as bmm(q, s.T). 
+            # q: (M, N, C). s: (M, N, C).
+            # scores = q @ s.T -> (M, N, N). scores[b, i, j] = q[b, i] . s[b, j]
+            # Diagonal: scores[b, i, i] = q[b, i] . s[b, i]
+            
+            scores_diag = torch.diagonal(scores, dim1=1, dim2=2) # (B*K, N)
+            # Sum over N? Mean over N?
+            # Cosine Sim of images = (A . B) / |A||B|.
+            # If pixels are normalized, Sum(A_i . B_i) is roughly A.B?
+            # Let's use Mean Diagonal Cost (1 - similarity).
+            
+            dist_per_px = 1 - scores_diag # (B*K, N)
+            distances = torch.mean(dist_per_px, dim=1).view(B, k)
+            
+        else:
+             raise ValueError(f"Unknown Metric Type: {Config.METRIC_TYPE}")
+
         return distances, topk_indices
 
     def batch_sinkhorn_torch(self, M, reg, numItermax):

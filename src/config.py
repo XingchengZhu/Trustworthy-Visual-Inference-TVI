@@ -43,7 +43,7 @@ class Config:
             
         for key, value in config_dict.items():
             # Convert key to uppercase to match class attributes
-            attr_name = key.upper()
+            attr_name = key.strip().upper()
             if hasattr(cls, attr_name):
                 setattr(cls, attr_name, value)
             else:

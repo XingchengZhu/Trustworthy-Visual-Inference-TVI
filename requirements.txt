@@ -4,3 +4,4 @@ pot
 scikit-learn
 tqdm
 matplotlib
+pandas

@@ -85,6 +85,13 @@ def main():
     # Load Config
     Config.load_config(args.config)
     
+    # Set Seeds
+    import numpy as np
+    torch.manual_seed(Config.SEED)
+    np.random.seed(Config.SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(Config.SEED)
+    
     if not os.path.exists(Config.Checkpoints_DIR):
         os.makedirs(Config.Checkpoints_DIR)
         

@@ -88,45 +88,76 @@ class OTMetric:
 
     def batch_sinkhorn_torch(self, M, reg, numItermax):
         """
-        PyTorch implementation of Sinkhorn algorithm for batched cost matrices.
+        Log-domain PyTorch implementation of Sinkhorn algorithm for batched cost matrices.
+        More stable for small reg or large costs.
         M: (Batch, N, N)
         Returns: (Batch,) distances
         """
         B, N, _ = M.shape
         
-        # Uniform marginals
-        a = torch.ones((B, N), device=M.device) / N
-        b = torch.ones((B, N), device=M.device) / N
+        # Log mu, Log nu (Uniform marginals)
+        # log(1/N) = -log(N)
+        log_mu = -torch.log(torch.tensor(float(N), device=M.device)).repeat(B, N)
+        log_nu = -torch.log(torch.tensor(float(N), device=M.device)).repeat(B, N)
         
-        # K = exp(-M / reg)
-        K = torch.exp(-M / reg)
+        # Init potentials f, g (dual variables)
+        # f = zeros, g = zeros
+        f = torch.zeros((B, N), device=M.device)
+        g = torch.zeros((B, N), device=M.device)
         
-        # Init u, v
-        u = torch.ones((B, N), device=M.device) / N
+        # Gibbs Kernel in log domain: K_log = -M / reg
+        K_log = -M / reg
         
-        # Sinkhorn iterations
         for _ in range(numItermax):
-            # v = b / (K^T @ u)
-            # K is (B, N, N). transpose(1, 2) -> (B, N, N)
-            # u is (B, N). unsqueeze(-1) -> (B, N, 1)
-            # bmm result: (B, N, 1). squeeze -> (B, N)
+            # Update f: f = reg * (log_mu - logsumexp((g + K_log)/reg)) ?
+            # Standard Sinkhorn in log domain:
+            # f_i = -reg * logsumexp( (g_j - M_ij/reg) ) + reg*log_mu_i  ... NO
             
-            # K.transpose(1, 2) @ u.unsqueeze(2) -> (B, N, 1)
-            Kv = torch.bmm(K.transpose(1, 2), u.unsqueeze(2)).squeeze(2)
-            v = b / (Kv + 1e-8)
+            # Derived from: u = a / (K @ v).  f = reg * log(u). g = reg * log(v).
+            # u = exp(f/reg), v = exp(g/reg)
+            # exp(f/reg) = exp(log_mu) / ( exp(-M/reg) @ exp(g/reg) )
+            # f/reg = log_mu - log( sum( exp(-M/reg + g/reg) ) )
+            # f = reg * log_mu - reg * logsumexp( (-M + g_broad) / reg )
             
-            # u = a / (K @ v)
-            Ku = torch.bmm(K, v.unsqueeze(2)).squeeze(2)
-            u = a / (Ku + 1e-8)
+            # M is (B, N, N). g is (B, N).
+            # g_broad (B, 1, N) for broadcasting over i
+            # (-M + g) is (B, N, N)
             
-        # Compute distance
-        # dist = sum(u * (K * M) * v)
-        # K * M -> elementwise
-        # u.unsqueeze(2) * (K*M) * v.unsqueeze(1) -> (B, N, N)
+            g_unsqueezed = g.unsqueeze(1) # (B, 1, N)
+            
+            # LogSumExp along dim=2 (j)
+            lse_g = torch.logsumexp( (-M + g_unsqueezed) / reg, dim=2) # (B, N)
+            
+            f = reg * log_mu - reg * lse_g
+            
+            # Update g similarly
+            # g = reg * log_nu - reg * logsumexp( (-M.T + f)/reg )
+            
+            f_unsqueezed = f.unsqueeze(2) # (B, N, 1) to broadcast over j?
+            # Or transpose M.
+            # (-M + f_broad) where f is for i.
+            # We want sum over i for each j.
+            # (-M_{ij} + f_i)
+            
+            # M is (B, N, N)
+            # f_unsqueezed: (B, N, 1)
+            # (-M + f_unsqueezed) -> (B, N, N)
+            # lse along dim=1 (i) -> (B, N)
+            
+            lse_f = torch.logsumexp( (-M + f_unsqueezed) / reg, dim=1) # (B, N)
+            g = reg * log_nu - reg * lse_f
+            
+        # Compute OT distance
+        # dist = sum(P * M)
+        # P = exp( (f + g - M) / reg ) roughly?
+        # Actually P_{ij} = u_i * K_{ij} * v_j = exp(f_i/reg) * exp(-M_{ij}/reg) * exp(g_j/reg)
+        # P_{ij} = exp( (f_i + g_j - M_{ij}) / reg )
         
-        # Transport plan P = u.dimshuffle(0,1,x) * K * v.dimshuffle(0,x,1)
-        # P = diag(u) K diag(v)
-        P = u.unsqueeze(2) * K * v.unsqueeze(1)
+        f_us = f.unsqueeze(2) # (B, N, 1)
+        g_us = g.unsqueeze(1) # (B, 1, N)
+        
+        log_P = (f_us + g_us - M) / reg
+        P = torch.exp(log_P)
         
         dist = torch.sum(P * M, dim=[1, 2])
         

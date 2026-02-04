@@ -72,7 +72,11 @@ def plot_metrics(train_losses, train_accs, val_losses, val_accs):
     plt.legend()
     
     plt.tight_layout()
-    plt.savefig(os.path.join(Config.RESULTS_DIR, 'training_metrics.png'))
+    # Save to dataset specific directory
+    save_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    plt.savefig(os.path.join(save_dir, 'training_metrics.png'))
     plt.close()
 
 import argparse

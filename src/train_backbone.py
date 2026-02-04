@@ -84,6 +84,7 @@ import argparse
 def main():
     parser = argparse.ArgumentParser(description="Train TVI Backbone")
     parser.add_argument("--config", type=str, default="conf/cifar10.json", help="Path to config file")
+    parser.add_argument("--log_suffix", type=str, default=None, help="Suffix for log file")
     args = parser.parse_args()
     
     # Load Config
@@ -109,7 +110,8 @@ def main():
         os.makedirs(results_dir)
         
     from src.utils import setup_logger
-    logger = setup_logger(results_dir, name="experiment")
+    log_name = f"experiment_{args.log_suffix}" if args.log_suffix else "experiment"
+    logger = setup_logger(results_dir, name=log_name)
     
     device = torch.device(Config.DEVICE)
     logger.info(f"Using device: {device}")

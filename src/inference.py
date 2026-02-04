@@ -122,10 +122,14 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     # Metrics for Plots
     all_correct_fusion = [] # Boolean mask for ID
     
+    # Time measurement
+    start_time = time.time()
+    
     logger.info(f"Starting ID Inference... (Baseline Mode: {args.baseline})")
     with torch.no_grad():
         for images, labels in tqdm(test_loader, desc="Inference"):
             images, labels = images.to(device), labels.to(device)
+            # ... process one batch ...
             
             # 1. Backbone
             features, logits = model(images)
@@ -234,10 +238,15 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
     acc_fuse = 100 * correct_fusion / total
     ece_score = compute_ece(all_probs_fusion, all_labels_tensor)
     
+    end_time = time.time()
+    total_time = end_time - start_time
+    avg_latency_ms = (total_time / total) * 1000 # ms per sample
+    
     logger.info(f"Parametric Acc: {acc_param:.2f}%")
     logger.info(f"Non-Parametric Acc: {acc_nonparam:.2f}%")
     logger.info(f"Fused Acc: {acc_fuse:.2f}%")
     logger.info(f"ECE Score: {ece_score:.4f}")
+    logger.info(f"Inference Latency: {avg_latency_ms:.2f} ms/sample")
     
     # -----------------------
     # OOD Evaluation
@@ -394,7 +403,8 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
         "accuracy_parametric": float(acc_param),
         "accuracy_nonparametric": float(acc_nonparam),
         "accuracy_fusion": float(acc_fuse),
-        "ece": float(ece_score),
+        "ece": ece_score,
+        "avg_latency_ms": avg_latency_ms,
         "auroc_ood": ood_results, # Nested dict
         "avg_uncertainty_id": float(total_uncertainty / total),
     }
@@ -468,6 +478,7 @@ def main():
     parser.add_argument("--config", type=str, default="conf/cifar10.json", help="Path to config file")
     parser.add_argument("--task_note", type=str, default="Base", help="Note for the experiment (e.g. Ablation, Baseline)")
     parser.add_argument("--baseline", action="store_true", help="Run in baseline mode (only Parametric branch, skip OT/Fusion)")
+    parser.add_argument("--log_suffix", type=str, default=None, help="Suffix for the log file name (e.g. experiment_baseline.log)")
     
     # Ablation / Sensitivity Overrides
     parser.add_argument("--k_neighbors", type=int, default=None, help="Override K Neighbors")
@@ -499,8 +510,10 @@ def main():
     results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
     if not os.path.exists(results_dir):
          os.makedirs(results_dir)
-
-    logger = setup_logger(results_dir, name="experiment")
+    from src.utils import setup_logger
+    log_name = f"experiment_{args.log_suffix}" if args.log_suffix else "experiment"
+    logger = setup_logger(results_dir, name=log_name)
+    
     device = torch.device(Config.DEVICE)
     logger.info(f"Using device: {device}")
     logger.info("="*30)

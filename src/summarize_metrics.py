@@ -43,6 +43,7 @@ def main():
             summary_lines.append(f"  Accuracy (Param):  {data.get('accuracy_parametric', 'N/A')}%")
             summary_lines.append(f"  Accuracy (OT):     {data.get('accuracy_nonparametric', 'N/A')}%")
             summary_lines.append(f"  ECE:               {data.get('ece', 'N/A')}")
+            summary_lines.append(f"  Latency:           {data.get('avg_latency_ms', 'N/A'):.2f} ms/sample")
             
             ood_data = data.get('auroc_ood', {})
             if ood_data:

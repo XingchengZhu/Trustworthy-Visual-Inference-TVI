@@ -32,7 +32,12 @@ def build_support_set(model, support_loader, device, logger):
     if os.path.exists(support_path):
         logger.info(f"Loading cached support set from {support_path}")
         data = torch.load(support_path, map_location=device)
-        return data['features'], data['labels']
+        # Check if new cache format
+        if 'virtual_outliers' in data:
+            return data['features'], data['labels'], data['virtual_outliers'], data['gamma_scale']
+        else:
+            logger.warning("Old cache format found. Rebuilding...")
+
 
     logger.info("Building Support Set Features...")
     support_features = []
@@ -40,6 +45,9 @@ def build_support_set(model, support_loader, device, logger):
     
     samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
     class_counts = {i: 0 for i in range(Config.NUM_CLASSES)}
+    
+    # Store features by class for prototype calculation
+    class_features = {i: [] for i in range(Config.NUM_CLASSES)}
     
     with torch.no_grad():
         for images, labels in tqdm(support_loader, desc="Extracting Support", leave=False):
@@ -49,8 +57,10 @@ def build_support_set(model, support_loader, device, logger):
             for i in range(images.size(0)):
                 lbl = labels[i].item()
                 if class_counts[lbl] < samples_per_class:
-                    support_features.append(features[i].cpu()) 
+                    feat = features[i].cpu()
+                    support_features.append(feat)
                     support_labels.append(lbl)
+                    class_features[lbl].append(feat)
                     class_counts[lbl] += 1
             
             if all(c >= samples_per_class for c in class_counts.values()):
@@ -59,13 +69,66 @@ def build_support_set(model, support_loader, device, logger):
     support_features = torch.stack(support_features).to(device)
     support_labels = torch.tensor(support_labels).to(device)
     
-    logger.info(f"Support Set Created. Shape: {support_features.shape}")
+    # --- Virtual Outlier Generation & Adaptive Gamma ---
+    # 1. Prototypes
+    prototypes = []
+    for i in range(Config.NUM_CLASSES):
+        # Stack features for class i: (N_c, C, H, W)
+        feats = torch.stack(class_features[i]) 
+        # Mean: (C, H, W)
+        proto = torch.mean(feats, dim=0)
+        prototypes.append(proto)
+    prototypes = torch.stack(prototypes).to(device) # (K, C, H, W)
     
-    # Cache support set
-    torch.save({'features': support_features, 'labels': support_labels}, support_path)
+    # 2. Global Center
+    global_center = torch.mean(prototypes, dim=0) # (C, H, W)
+    
+    # 3. Virtual Outliers (Linear Extrapolation)
+    # v_k = p_k + beta * (p_k - global_center)
+    beta = 1.0 # Hyperparameter, could be in Config
+    virtual_outliers = prototypes + beta * (prototypes - global_center)
+    
+    # 4. Adaptive Gamma
+    # Compute mean intra-class distance (or simplified global mean distance)
+    # Ideally: compute pair-wise distances in support set... expensive.
+    # Approximation: Inverse of mean distance between prototypes? No, that's inter-class.
+    # Approximation: Reuse OTMetric?
+    # Let's use a heuristic: 1 / N_features?
+    # Better: 1 / Mean( || p_i - p_global || )
+    # Let's stick to the Plan: "Based on support set internal stats".
+    # We'll use the mean L2 distance of samples to their prototypes as sigma.
+    # gamma = 1 / sigma^2 ?? Or just 1/mean_dist.
+    
+    # Let's compute average distance of samples to their class prototype
+    total_dist = 0.0
+    count = 0
+    # Sampling for speed
+    for i in range(Config.NUM_CLASSES):
+        # Take first 10 samples
+        samples = torch.stack(class_features[i][:10]).to(device)
+        proto = prototypes[i].unsqueeze(0)
+        # Dist (Euclidean for simplicity of scale)
+        d = torch.norm(samples - proto, p=2, dim=[1,2,3])
+        total_dist += torch.sum(d).item()
+        count += len(samples)
+    
+    avg_dist = total_dist / count
+    gamma_scale = 1.0 / (avg_dist + 1e-6)
+    
+    logger.info(f"Support Set Created. Shape: {support_features.shape}")
+    logger.info(f"Generated {virtual_outliers.shape[0]} Virtual Outliers.")
+    logger.info(f"Adaptive Gamma: {gamma_scale:.4f}")
+    
+    # Cache (including new items)
+    torch.save({
+        'features': support_features, 
+        'labels': support_labels,
+        'virtual_outliers': virtual_outliers,
+        'gamma_scale': gamma_scale
+    }, support_path)
     logger.info(f"Saved support set to {support_path}")
     
-    return support_features, support_labels
+    return support_features, support_labels, virtual_outliers, gamma_scale
 
 def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
     uncertainties = np.array(uncertainties).flatten()
@@ -96,7 +159,7 @@ def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
     plt.savefig(os.path.join(results_dir, 'uncertainty_distribution.png'))
     plt.close()
 
-def evaluate(model, test_loader, support_features, support_labels, device, logger, args):
+def evaluate(model, test_loader, support_features, support_labels, virtual_outliers, gamma_scale, device, logger, args):
     ot_metric = OTMetric(device)
     evidence_extractor = EvidenceExtractor(num_classes=Config.NUM_CLASSES)
     fusion_module = DempsterShaferFusion(num_classes=Config.NUM_CLASSES)
@@ -155,14 +218,19 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
             confidence = torch.max(alpha_param / S_param.unsqueeze(1), 1)[0]
             
             if not args.baseline:
-                # 3. Non-Parametric
-                ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
-                evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
+                # 3. Non-Parametric with Virtual Outliers
+                ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers)
+                
+                # Use Adaptive Gamma
+                evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels, gamma_scale=gamma_scale)
                 alpha_nonparam = evidence_nonparam + 1
                 
-                # 4. Fusion
-                # Now fusion returns (alpha, u, C)
-                alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+                # 4. Fusion with Entropy Discounting
+                # Compute Entropy of Parametric Branch
+                entropy_param = fusion_module.compute_entropy(alpha_param)
+                
+                # Fusion
+                alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=entropy_param)
                 
                 # Update vars
                 S_nonparam = torch.sum(alpha_nonparam, dim=1)
@@ -315,11 +383,13 @@ def evaluate(model, test_loader, support_features, support_labels, device, logge
                     min_ot_dist = torch.zeros_like(u_fuse)
                     
                     if not args.baseline:
-                        ot_dists, topk_indices = ot_metric.compute_batch_ot(features, support_features, support_labels)
-                        evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels)
+                        ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers)
+                        
+                        evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels, gamma_scale=gamma_scale)
                         alpha_nonparam = evidence_nonparam + 1
                         
-                        alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam)
+                        entropy_param = fusion_module.compute_entropy(alpha_param)
+                        alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=entropy_param)
                         min_ot_dist = ot_dists[:, 0]
                     
                     # Branch Uncertainties
@@ -535,11 +605,11 @@ def main():
     model = load_backbone(device, logger)
     
     # Build Support Set
-    support_features, support_labels = build_support_set(model, support_loader, device, logger)
+    support_features, support_labels, virtual_outliers, gamma_scale = build_support_set(model, support_loader, device, logger)
     
     # Run Evaluation
     # Run Evaluation
-    evaluate(model, test_loader, support_features, support_labels, device, logger, args)
+    evaluate(model, test_loader, support_features, support_labels, virtual_outliers, gamma_scale, device, logger, args)
 
 if __name__ == "__main__":
     main()

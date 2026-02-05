@@ -17,19 +17,20 @@ class EvidenceExtractor:
         evidence = F.softplus(logits)
         return evidence
 
-    def get_non_parametric_evidence(self, ot_distances, topk_indices, support_labels):
+    def get_non_parametric_evidence(self, ot_distances, topk_indices, support_labels, gamma_scale=None):
         """
         Convert OT distances to evidence.
         ot_distances: (B, K)
         topk_indices: (B, K)
         support_labels: (S,) - tensor
+        gamma_scale: float, optional adaptive gamma (usually 1/mean_dist)
         """
         B, K = ot_distances.shape
         evidence = torch.zeros((B, self.num_classes)).to(support_labels.device)
         
         # RBF Kernel conversion: s = exp(-gamma * d)
-        # Gamma parameter tuning is important.
-        gamma = Config.RBF_GAMMA 
+        # If gamma_scale provided (Adaptive), use it. Else Config default.
+        gamma = gamma_scale if gamma_scale is not None else Config.RBF_GAMMA
         
         # Convert distances to similarity/affinity
         # ot_distances is numpy array from previous step usually, let's ensure tensor

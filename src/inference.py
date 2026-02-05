@@ -52,7 +52,8 @@ def build_support_set(model, support_loader, device, logger):
     with torch.no_grad():
         for images, labels in tqdm(support_loader, desc="Extracting Support", leave=False):
             images = images.to(device)
-            features, _ = model(images) 
+            # Model returns: spatial_feats, flat, logits
+            features, _, _ = model(images) 
             
             for i in range(images.size(0)):
                 lbl = labels[i].item()
@@ -83,10 +84,22 @@ def build_support_set(model, support_loader, device, logger):
     # 2. Global Center
     global_center = torch.mean(prototypes, dim=0) # (C, H, W)
     
-    # 3. Virtual Outliers (Linear Extrapolation)
-    # v_k = p_k + beta * (p_k - global_center)
-    beta = 1.0 # Hyperparameter, could be in Config
-    virtual_outliers = prototypes + beta * (prototypes - global_center)
+    # 3. Virtual Outliers (VOS Algorithm)
+    # v_k = p_k + beta * (p_k - global_center) + epsilon
+    beta = Config.VO_BETA
+    
+    virtual_outliers_list = []
+    num_vos_per_class = 5 
+    
+    for proto in prototypes:
+        direction = proto - global_center
+        
+        for _ in range(num_vos_per_class):
+            epsilon = torch.randn_like(proto) * 0.1 
+            vo = proto + beta * direction + epsilon
+            virtual_outliers_list.append(vo)
+            
+    virtual_outliers = torch.stack(virtual_outliers_list)
     
     # 4. Adaptive Gamma
     # Compute mean intra-class distance (or simplified global mean distance)
@@ -195,7 +208,9 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             # ... process one batch ...
             
             # 1. Backbone
-            features, logits = model(images)
+            # Return: spatial, flat, logits
+            spatial_feats, _, logits = model(images)
+            features = spatial_feats # Alias for OTMetric
             
             # 2. Parametric
             evidence_param = evidence_extractor.get_parametric_evidence(logits)
@@ -372,7 +387,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         try:
             with torch.no_grad():
                 for images, labels in current_ood_loop_func():
-                    features, logits = model(images)
+                    spatial_feats, _, logits = model(images)
+                    features = spatial_feats
                     
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
                     alpha_param = evidence_param + 1
@@ -386,7 +402,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     min_ot_dist = torch.zeros_like(u_fuse)
                     
                     if not args.baseline:
-                        ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers)
+                        ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(spatial_feats, support_features, support_labels, virtual_outliers=virtual_outliers)
                         
                         evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
                             ot_dists, topk_indices, support_labels, 

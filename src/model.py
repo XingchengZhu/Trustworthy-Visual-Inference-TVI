@@ -42,7 +42,8 @@ class ResNetBackbone(nn.Module):
         # ResNet18/34: 512, ResNet50/Wide: 2048
         self.num_features = 512 * expansion
         
-        # 4. Reset FC Layer
+        # 4. Feature Normalization & FC
+        self.bn = nn.BatchNorm1d(self.num_features)
         self.resnet.fc = nn.Linear(self.num_features, num_classes)
         
     def forward(self, x):
@@ -57,15 +58,21 @@ class ResNetBackbone(nn.Module):
         x = self.resnet.layer3(x)
         x = self.resnet.layer4(x)
         
-        # x shape:
-        # CIFAR (ResNet18): (B, 512, 4, 4)
-        # ImageNet (ResNet18): (B, 512, 7, 7)
-        # ImageNet (ResNet50): (B, 2048, 7, 7)
-        features = x 
+        # GAP
+        out = self.resnet.avgpool(x)
+        features = torch.flatten(out, 1)
         
-        # GAP and FC
-        out = self.resnet.avgpool(features)
-        out = torch.flatten(out, 1)
-        logits = self.resnet.fc(out)
+        # BN (Feature Norm)
+        features = self.bn(features)
         
-        return features, logits
+        logits = self.resnet.fc(features)
+        
+        # Return features before BN or after?
+        # Usually for metric learning we want the normalized features that were used for classification.
+        # But for OT (SPP) we need spatial features.
+        # Wait, SPP uses 'x' (before GAP).
+        # The 'features' returned here are usually used for visualization or simple metric.
+        # The OT module uses the 'x' (spatial features).
+        # However, Center Loss needs the flattened features 'features'.
+        
+        return x, features, logits

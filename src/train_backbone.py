@@ -7,20 +7,39 @@ from src.config import Config
 from src.dataset import get_dataloaders
 from src.model import ResNetBackbone
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model, loader, criterion, center_loss_func, optimizer, optimizer_center, device):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     
+    # Weight for Center Loss
+    weight_center = Config.CENTER_LOSS_WEIGHT
+    
     for images, labels in tqdm(loader, desc="Training", leave=False):
         images, labels = images.to(device), labels.to(device)
         
         optimizer.zero_grad()
-        _, logits = model(images)
-        loss = criterion(logits, labels)
+        optimizer_center.zero_grad()
+        
+        # Model returns: spatial_features, flat_features, logits
+        _, features, logits = model(images)
+        
+        loss_cls = criterion(logits, labels)
+        loss_center = center_loss_func(features, labels)
+        
+        loss = loss_cls + weight_center * loss_center
+        
         loss.backward()
         optimizer.step()
+        # Create a new optimizer for center loss or just step it manually if it were simple param.
+        # But usually we use an optimizer.
+        for param in center_loss_func.parameters():
+            # Gradients for centers are computed in backward()
+            # We need to update them. standard SGD for centers.
+            # Usually lr for centers is 0.5
+            pass
+        optimizer_center.step()
         
         running_loss += loss.item()
         _, predicted = torch.max(logits.data, 1)
@@ -38,7 +57,8 @@ def validate(model, loader, criterion, device):
     with torch.no_grad():
         for images, labels in tqdm(loader, desc="Validation", leave=False):
             images, labels = images.to(device), labels.to(device)
-            _, logits = model(images)
+            # Unpack 3 values
+            _, _, logits = model(images)
             loss = criterion(logits, labels)
             
             running_loss += loss.item()
@@ -120,10 +140,19 @@ def main():
     train_loader, _, test_loader = get_dataloaders()
     
     # Use Config.NUM_CLASSES
+    from src.loss import CenterLoss
+    
+    # Model Setup
     from src.model import ResNetBackbone
     model = ResNetBackbone(num_classes=Config.NUM_CLASSES).to(device)
+    
     criterion = nn.CrossEntropyLoss()
+    center_loss = CenterLoss(num_classes=Config.NUM_CLASSES, feat_dim=model.num_features, use_gpu=True)
+    center_loss = center_loss.to(device)
+    
     optimizer = optim.SGD(model.parameters(), lr=Config.LR, momentum=Config.MOMENTUM, weight_decay=Config.WEIGHT_DECAY)
+    optimizer_center = optim.SGD(center_loss.parameters(), lr=0.5) # Alpha usually 0.5
+    
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.EPOCHS)
     
     best_acc = 0.0
@@ -133,7 +162,7 @@ def main():
     val_losses, val_accs = [], []
     
     for epoch in range(Config.EPOCHS):
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, center_loss, optimizer, optimizer_center, device)
         val_loss, val_acc = validate(model, test_loader, criterion, device)
         
         train_losses.append(train_loss)

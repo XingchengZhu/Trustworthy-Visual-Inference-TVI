@@ -46,6 +46,10 @@ class Config:
     
     # Fusion
     FUSION_TYPE = "dempster_shafer" # dempster_shafer, average
+    
+    # Advanced / Metrics Learning
+    CENTER_LOSS_WEIGHT = 0.005 # Default recommendation is 0.003-0.01 for ResNet
+    VO_BETA = 1.0
 
     @classmethod
     def load_config(cls, config_path):

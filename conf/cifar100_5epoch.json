@@ -1,0 +1,15 @@
+{
+    "dataset_name": "cifar100",
+    "num_classes": 100,
+    "batch_size": 128,
+    "epochs": 5,
+    "lr": 0.1,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "num_support_samples": 2000,
+    "sinkhorn_eps": 0.1,
+    "sinkhorn_max_iter": 100,
+    "k_neighbors": 10,
+    "evidence_scale": 1.0,
+    "rbf_gamma": 1.0
+}

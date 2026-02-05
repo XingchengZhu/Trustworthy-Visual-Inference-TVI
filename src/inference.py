@@ -221,8 +221,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 # 3. Non-Parametric with Virtual Outliers
                 ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers)
                 
-                # Use Adaptive Gamma
-                evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels, gamma_scale=gamma_scale)
+                # Use Adaptive Gamma & Virtual Outlier Discounting
+                evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
+                    ot_dists, topk_indices, support_labels, 
+                    gamma_scale=gamma_scale, vo_distances=vo_dists
+                )
                 alpha_nonparam = evidence_nonparam + 1
                 
                 # 4. Fusion with Entropy Discounting
@@ -385,7 +388,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     if not args.baseline:
                         ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers)
                         
-                        evidence_nonparam = evidence_extractor.get_non_parametric_evidence(ot_dists, topk_indices, support_labels, gamma_scale=gamma_scale)
+                        evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
+                            ot_dists, topk_indices, support_labels, 
+                            gamma_scale=gamma_scale, vo_distances=vo_dists
+                        )
                         alpha_nonparam = evidence_nonparam + 1
                         
                         entropy_param = fusion_module.compute_entropy(alpha_param)

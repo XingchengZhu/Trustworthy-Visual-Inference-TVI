@@ -1,83 +1,154 @@
-Title: Trustworthy Visual Inference: Synergizing Parametric and Non-Parametric Representations via Optimal Transport and Evidential Fusion
+# 可信视觉推理研究计划书 (Trustworthy Visual Inference Research Proposal)
 
-1. 研究背景与问题阐述 (Background & Problem Statement)
-1.1 现状
-深度卷积神经网络（CNNs）已在图像分类任务上取得了超越人类的表现。然而，现有的主流模型主要依赖**参数化（Parametric）**的 Softmax 推理机制，存在两个核心缺陷：
-1. 过度自信（Over-confidence）： 模型倾向于对错误样本或分布外（OOD）样本输出极高的置信度，缺乏对“自身无知（Ignorance）”的表达能力。
-2. 度量失效（Metric Failure）： 传统的 k-NN 辅助推理往往依赖欧氏距离或余弦相似度。但在高维特征空间中，这些刚性度量忽略了特征图的空间结构（Spatial Structure）和几何形变（Geometric Deformation），导致检索结果语义偏差。
-1.2 核心假设
-本研究提出假设：
-1. 图像不应被视为特征空间中的一个单点，而应被视为由局部特征描述符组成的经验分布（Empirical Distribution）。通过**最优传输（Optimal Transport, OT）**理论计算分布间的距离，能更鲁棒地捕捉语义相似性。
-2. 推理不应是单纯的概率预测，而是**证据收集（Evidence Acquisition）**过程。通过 Dempster-Shafer 证据理论 融合参数化（网络权重）与非参数化（OT检索）的证据，可以实现高鲁棒性的可信推理。
+**项目标题：** Trustworthy Visual Inference: Synergizing Parametric and Non-Parametric Representations via Virtual Outlier-Enhanced Optimal Transport and Evidential Fusion
+**(中文标题：基于虚拟离群点增强最优传输与自适应证据融合的可信视觉推理研究)**
 
-2. 研究方法 (Methodology)
-本研究提出一个**无需重训（Training-Free/Post-hoc）**的推理框架，包含三个核心模块。
-总体架构图
-输入图像  经过 Backbone 提取特征。我们保留空间特征图用于 OT 计算，同时保留 Logits 用于参数化证据提取。
+---
 
-Module 1: 基于最优传输的结构化特征度量 (Structure-Aware Metric via Optimal Transport)
-目标： 替代传统的欧氏距离，利用 Wasserstein 距离（推土机距离）解决特征对齐与形变问题。
-具体实现：
-1. 分布建模 (Distribution Modeling):
-放弃全局平均池化（GAP），提取 Backbone 最后一层卷积的特征图 。
-将测试图像  视为一个离散分布 ，其中  是局部特征点的数量， 是特征向量， 是归一化权重（通常设为 ）。同理，训练集中的 Support Set 样本视为分布 。
-2. 代价矩阵构建 (Cost Matrix):
-计算分布  中第  个局部特征与分布  中第  个局部特征的基准距离（如余弦距离）：
-3. Sinkhorn 距离求解 (Sinkhorn Algorithm):
-为了解决标准 OT 计算复杂度高（）的问题，采用熵正则化的 Sinkhorn 算法求解近似 Wasserstein 距离：
+## 1. 研究背景与问题阐述 (Background & Problem Statement)
 
-其中  是传输方案（Transport Plan）， 是熵正则项。
-创新价值： 该模块允许特征在空间上进行“软匹配（Soft Matching）”，即使物体发生了平移或非刚性形变，OT 依然能通过最小传输代价捕捉到其相似性。
+### 1.1 现状与挑战
 
-Module 2: 双流证据提取机制 (Dual-Stream Evidence Extraction)
-目标： 将确定性的数值转化为狄利克雷分布（Dirichlet Distribution）的参数，量化“支持度”。
-分支 A：参数化证据 (Parametric Evidence)
-利用 ResNet/ViT 的 Logits 直接映射为证据向量。
-● 公式：
+深度卷积神经网络（CNNs）与视觉 Transformer（ViTs）在闭集图像分类任务上已取得卓越性能。然而，在开放世界（Open-World）部署中，现有的主流模型主要依赖**参数化（Parametric）**的 Softmax 推理机制，存在两个严重的内生缺陷：
 
-● 解释：  代表神经网络“凭经验”认为样本属于第  类的证据量。
-分支 B：非参数化证据 (Non-Parametric Evidence)
-基于 Module 1 计算出的 Sinkhorn 距离进行证据转换。
-● 检索： 在特征库中检索出与 Query 样本 Sinkhorn 距离最小的 Top- 个邻居。
-● 证据转化： 利用 RBF 核函数将 OT 距离转化为相似度（证据）：
-● 类别聚合：
+1. **过度自信（Over-confidence）：** 模型倾向于对错误样本或分布外（OOD）样本输出极高的置信度（High Confidence, Low Accuracy），缺乏对“认知不确定性（Epistemic Uncertainty）”的表达能力。
+2. **度量失效（Metric Failure）：** 现有的非参数化辅助推理（如 Deep k-NN）多依赖欧氏距离或余弦相似度。但在高维特征空间中，这些刚性度量忽略了特征图的**空间结构（Spatial Structure）**和**几何形变**，导致在面对结构差异（如数字 vs 物体）时的检索结果产生严重的语义偏差。
 
-● 解释： 只有当在训练集中找到结构极其相似的样本（OT 距离小）时，该分支才会提供强证据。否则（如 OOD 样本），证据量趋近于 0。
+### 1.2 核心假设
 
-Module 3: 基于证据理论的不确定性融合 (Uncertainty-Guided Evidential Fusion)
-目标： 使用 Dempster-Shafer (DS) 理论融合两个分支的观点，输出包含“认知不确定性”的最终结果。
-融合逻辑：
-将两个分支视为两个独立的信源，每个信源提供一组信念质量（Belief Mass）：
-● : 对第  类的置信度。
-● : 整体的不确定性 (Uncertainty mass)。
+本研究基于以下两个核心假设：
 
-Dempster 组合规则 (Orthogonal Sum):
-融合后的信念质量 ：
+1. **分布视角的度量：** 图像不应被视为特征空间中的一个单点，而应被视为由局部特征描述符组成的**经验分布（Empirical Distribution）**。通过**最优传输（Optimal Transport, OT）**理论计算分布间的 Wasserstein 距离，能比欧氏距离更鲁棒地捕捉语义相似性。
+2. **证据视角的推理：** 推理不应是单纯的概率预测，而是**证据收集（Evidence Acquisition）**过程。通过 Dempster-Shafer 证据理论（DST）融合参数化（网络权重）与非参数化（OT检索）的证据，可以有效量化“冲突”与“无知”。
 
-核心优势：
-● 冲突处理： 如果 Net 说是猫，OT 说是车，融合结果会降低两者的置信度，并增加不确定性 。
-● 无知处理： 如果 Net 不确定（logits 平坦），OT 也不确定（距离都很远），最终结果  会非常高，明确告知用户“我不知道”。
+---
 
-3. 预期创新点 (Expected Contributions)
-1. 方法论创新： 首次将 Sinkhorn Optimal Transport 引入到测试时（Test-Time）分类增强任务中，作为 k-NN 的度量基础，解决了高维特征对齐难题。
-2. 理论框架创新： 构建了一个端到端的 Evidence-based Inference 框架，将传统的 Softmax 概率融合升级为基于 DS 理论的信念融合，填补了参数化与非参数化模型在可信计算领域融合的空白。
-3. 实际性能： 预期在**噪声干扰（Corrupted Data）和分布外检测（OOD Detection）**任务上，显著优于现有的 Baseline（如纯 Softmax 或 简单的 Softmax+kNN 加权）。
+## 2. 研究方法 (Methodology)
 
-4. 实验计划 (Experimental Plan)
-4.1 数据集
-● In-Distribution: CIFAR-10, CIFAR-100, ImageNet-100。
-● Out-of-Distribution (用于测试不确定性): SVHN, LSUN, Gaussian Noise。
-4.2 对比基线 (Baselines)
-● Standard ResNet/ViT (Cross Entropy)。
-● Deep k-NN (Standard Euclidean Distance)。
-● DDU (Deep Deterministic Uncertainty)。
-● Mahalanobis Distance based detector。
-4.3 核心实验与指标
-1. 分类准确率 (Accuracy): 验证 OT-kNN 融合是否提升了 ID 数据的准确性。
-2. 不确定性校准 (Calibration): 使用 ECE (Expected Calibration Error) 指标，验证输出概率是否真实的反映了准确率。
-3. OOD 检测能力: 使用 AUROC 指标，评估模型区分 ID 样本和 OOD 样本的能力（基于输出的  值）。
-4. 鲁棒性分析: 在 CIFAR-10-C (Corrupted) 数据集上测试，验证 OT 度量对抗图像畸变的能力。
+本研究提出一种**无需重训（Training-Free / Post-hoc）**的可信推理框架。该框架以预训练模型为骨干，通过引入**虚拟离群点**增强的结构化度量和**自适应证据融合**机制，解决近身分布外（Near-OOD）样本检测难题。
 
-5. 可行性分析 (Feasibility)
-● 计算代价： Sinkhorn 算法虽然比欧氏距离慢，但可以通过 Coarse-to-Fine 策略优化（先用欧氏距离筛选 Top-50，再用 OT 精排），满足实时性要求。
-● 代码实现： PyTorch 配合 POT (Python Optimal Transport) 库可快速实现核心算法。
+总体架构包含三个核心模块：
+
+### Module 1: 虚拟离群点增强的结构化度量 (Structure-Aware Metric via Virtual Outliers)
+
+**目标：** 利用 Sinkhorn 距离捕捉空间结构差异，并通过构建“虚拟边界”解决仅依赖 ID 样本无法拒绝 Near-OOD 的问题。
+
+1. **特征提取与多尺度粗筛 (Feature Extraction & SPP Filtering):**
+* 输入图像  经过 Backbone 提取特征图 。
+* **全局标准化：** 对特征图执行 Global L2 Normalization，统一特征尺度。
+* **SPP 粗筛：** 采用空间金字塔池化（Spatial Pyramid Pooling, ）获取多尺度特征，在 Support Set 中快速筛选 Top- 个候选近邻，剔除结构显著不匹配的样本。
+
+
+2. **虚拟离群点生成 (Virtual Outlier Generation):**
+* 利用 Support Set 的类原型（Prototypes），在特征空间中沿远离原点或类中心的方向进行**线性外推（Linear Extrapolation）**，生成虚拟离群点集合 ：
+
+
+* 这些虚拟点模拟了 OOD 样本在特征流形边缘的分布，为 OT 度量提供了一个“拒绝参考系”。
+
+
+3. **双向 Sinkhorn 距离计算:**
+* 分别计算测试样本  到 Top- ID 样本的分布距离  和到虚拟离群点集的分布距离 。
+* 采用**熵正则化 Sinkhorn 算法**求解，利用特征图的空间对应关系计算结构化距离。
+
+
+
+### Module 2: 自适应双流证据提取 (Adaptive Dual-Stream Evidence)
+
+**目标：** 将确定性的数值映射为狄利克雷分布（Dirichlet Distribution）的参数（Evidence），并解决尺度敏感性问题。
+
+1. **参数化证据流 (Parametric Stream):**
+* 直接从 Logits 提取高层语义证据，使用 Softplus 激活函数保证非负性：
+
+
+
+
+2. **非参数化证据流 (Non-Parametric Stream):**
+* **自适应 RBF 核 (Adaptive RBF Kernel):** 针对 OT 距离 ，摒弃固定的  参数。动态计算缩放因子 （基于支持集内部平均距离统计量）。
+* 证据转换公式：
+
+
+* **机制：** 确保无论特征空间稀疏还是稠密，证据值都能保持在 [0, 1] 有效区间，避免梯度消失。
+
+
+
+### Module 3: 熵加权证据融合 (Entropy-Weighted Evidential Fusion)
+
+**目标：** 利用 Dempster-Shafer 理论融合双流证据，并根据各分支的“自身不确定性”动态调整融合权重。
+
+1. **信源不确定性评估:**
+* 计算参数化分支的归一化香农熵 。若 ，说明网络自身处于“混乱”状态。
+
+
+2. **动态质量折扣 (Mass Discounting):**
+* 在融合前，利用熵值  对参数化分支的信念质量（Belief Mass）进行降权，防止不可靠的 Softmax 主导结果：
+
+
+
+* 其中  代表“无知（Ignorance）”状态。
+
+
+3. **正交和融合 (Dempster's Combination):**
+* 将修正后的参数化信念与非参数化信念进行正交组合，计算最终信念 ：
+
+
+* **冲突处理：** 冲突因子  自动捕捉网络预测与 OT 检索的不一致，转化为最终的高不确定性 。
+
+
+
+---
+
+## 3. 预期创新点 (Expected Contributions)
+
+1. **方法论创新：** 提出首个将**结构化最优传输（OT）**与**Dempster-Shafer 证据理论**深度协同的推理框架。突破了以往方法仅利用 OT 做单一评分的局限，通过证据融合机制有效量化了参数化模型与几何度量之间的“认知冲突”。
+2. **度量鲁棒性：** 设计了**虚拟离群点增强的 Sinkhorn 距离**。通过引入虚拟边界，显著解决了传统 OT 方法在区分语义相似但类别不同（Near-OOD，如 CIFAR-100 vs CIFAR-10）样本时区分力不足的问题。
+3. **高性能插件：** 构建了一个完全**无需重训（Training-Free）**的通用推理插件，可直接应用于现有的 ResNet/ViT 模型，预期在 OOD 检测和抗噪声干扰任务上达到 SOTA 水平。
+
+---
+
+## 4. 实验计划 (Experimental Plan)
+
+### 4.1 数据集与设置
+
+* **In-Distribution (ID):** CIFAR-10, CIFAR-100, ImageNet-100。
+* **Out-of-Distribution (OOD):**
+* *Far-OOD:* SVHN, LSUN-Crop, Textures。
+* *Near-OOD:* CIFAR-100 (vs CIFAR-10), ImageNet-O。
+
+
+* **Backbone:** ResNet-18, ResNet-50 (预训练权重)。
+
+### 4.2 对比基线 (Baselines)
+
+我们将与以下三类 SOTA 方法进行对比：
+
+1. **经典 Post-hoc 方法:** MSP (Softmax), ODIN, Mahalanobis, Energy-based OOD.
+2. **不确定性/证据方法:** Deep Ensemble, EDL (Evidential Deep Learning), DDU.
+3. **最优传输/几何方法 (直接竞品):** Deep k-NN, **POT (IJCAI 2025)**, **OTOD (2025)**.
+
+### 4.3 核心实验与指标
+
+1. **OOD 检测性能 (主指标):**
+* 指标：**FPR95** (False Positive Rate at 95% TPR), **AUROC**。
+* 目标：在 CIFAR-100 vs SVHN 上，FPR95 < **25%**；在 CIFAR-100 vs CIFAR-10 上，优于 Deep k-NN 至少 **5-10%**。
+
+
+2. **不确定性校准 (Calibration):**
+* 指标：**ECE** (Expected Calibration Error)。验证融合后的置信度是否真实反映了预测准确率。
+
+
+3. **消融实验 (Ablation Study):**
+* 验证“虚拟离群点”模块的贡献（w/ vs w/o Virtual Outliers）。
+* 验证“自适应证据缩放”相对于固定 Gamma 的提升。
+* 验证“熵加权融合”相对于简单平均融合的优势。
+
+
+4. **鲁棒性分析:**
+* 在 **CIFAR-10-C** (19种图像腐蚀) 上测试模型准确率的下降幅度，验证 OT 度量对抗非刚性形变的能力。
+
+---
+
+## 5. 可行性分析 (Feasibility)
+
+* **理论支撑：** 团队已掌握 Dempster-Shafer 证据理论及 Sinkhorn 算法的核心推导，且最新的 SOTA 文献（如 POT, IJCAI 2025）证实了虚拟点在 OT 框架下的有效性。
+* **计算代价：** 虽然 Sinkhorn 算法复杂度较高（），但通过本计划提出的 **Coarse-to-Fine（SPP粗筛 + OT精排）** 策略，可将单张图像的推理延迟控制在毫秒级，满足实时性要求。
+* **代码实现：** 项目将基于 PyTorch 和 Python Optimal Transport (POT) 库开发。目前已完成基础框架搭建（ResNet Backbone + 基础 OT 模块），引入虚拟点和自适应融合属于模块级更新，工程风险可控。

@@ -84,19 +84,49 @@ def build_support_set(model, support_loader, device, logger):
     # 2. Global Center
     global_center = torch.mean(prototypes, dim=0) # (C, H, W)
     
-    # 3. Virtual Outliers (VOS Algorithm)
-    # v_k = p_k + beta * (p_k - global_center) + epsilon
+    # 3. Virtual Outliers (Boundary Sampling)
+    # v_k = p_k + beta * (p_nearest - p_k) + epsilon
+    # Instead of global center, we target the nearest other class (boundary).
     beta = Config.VO_BETA
     
     virtual_outliers_list = []
     num_vos_per_class = 5 
     
-    for proto in prototypes:
-        direction = proto - global_center
+    # Pre-compute pairwise distances between prototypes to find nearest neighbors
+    # prototypes: (K, C, H, W) -> flatten to (K, D)
+    K_classes = prototypes.size(0)
+    flat_protos = prototypes.view(K_classes, -1)
+    # Euclidean Matrix
+    # dist[i,j] = ||p_i - p_j||
+    dists_proto = torch.cdist(flat_protos, flat_protos)
+    # Mask diagonal
+    dists_proto.fill_diagonal_(float('inf'))
+    
+    # Indices of nearest neighbors
+    _, nearest_indices = torch.min(dists_proto, dim=1)
+    
+    for i in range(K_classes):
+        p_k = prototypes[i]
+        p_near = prototypes[nearest_indices[i]]
+        
+        # Direction to nearest neighbor
+        direction = p_near - p_k
         
         for _ in range(num_vos_per_class):
-            epsilon = torch.randn_like(proto) * 0.1 
-            vo = proto + beta * direction + epsilon
+            # Sample along the path to the boundary (around 0.5 * distance?)
+            # Usually Boundary VOS places points near the decision boundary.
+            # v = p_k + lambda * (p_near - p_k) + noise.
+            # lambda should be around 0.5 if beta is meant to be boundary.
+            # Use Config.VO_BETA as a scaling factor around 0.5? 
+            # Or assume VO_BETA is the lambda. Default 0.5?
+            # Let's use Beta as the interpolation factor directly.
+            # If Beta=0.5, it's exactly middle.
+            
+            # Add random jitter to Beta
+            lambda_sample = torch.normal(mean=beta, std=0.1) # e.g. 0.5 +/- 0.1
+            
+            epsilon = torch.randn_like(p_k) * 0.1 
+            vo = p_k + lambda_sample * direction + epsilon
             virtual_outliers_list.append(vo)
             
     virtual_outliers = torch.stack(virtual_outliers_list)

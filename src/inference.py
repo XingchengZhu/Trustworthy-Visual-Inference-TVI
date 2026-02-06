@@ -443,7 +443,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 # INTEGRATE CONFLICT INTO UNCERTAINTY (OOD Score)
                 # U_final = U_dempster + lambda * Conflict
                 # High conflict -> High OOD probability
-                u_fuse = u_fuse + C_fuse * 1.0 # Lambda=1.0 for now
+                # Increased weight to 2.0 for aggressive rejection of conflicting samples (Method 9)
+                u_fuse = u_fuse + C_fuse * 2.0
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -601,8 +602,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         entropy_param = fusion_module.compute_entropy(alpha_param)
                         alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=entropy_param)
                         
-                        # Integrate Conflict
-                        u_fuse = u_fuse + C_fuse * 1.0
+                        # Integrate Conflict (Aggressive Weighting)
+                        u_fuse = u_fuse + C_fuse * 2.0
                         
                         min_ot_dist = ot_dists[:, 0]
                     

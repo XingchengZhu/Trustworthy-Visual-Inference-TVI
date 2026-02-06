@@ -44,14 +44,11 @@ class OTMetric:
              s_flat = torch.matmul(s_flat, L)
              
              # Calculate Sim/Dist on WHITENED features
-             # For Mahalanobis: Euclidean on whitened features.
-             # For Sinkhorn: Euclidean Cost Matrix on whitened features.
-             
-             # Use normalized features for Cosine Similarity IF NOT WHITENED?
-             # BUT since we whitened, we usually care about magnitude variance (Mahalanobis).
-             # So we do NOT normalize L2 here if we want strict Mahalanobis logic.
-             q_norm = q_flat
-             s_norm = s_flat
+             # CRITICAL FIX: L2 Normalize Whitened Features to prevent Sinkhorn Underflow!
+             # Mahalanobis distance can be large (e.g. >100), causing exp(-M/eps) -> 0.
+             # Normalizing converts this to "Whitened Cosine", which is bounded [0, 4].
+             q_norm = torch.nn.functional.normalize(q_flat, dim=2)
+             s_norm = torch.nn.functional.normalize(s_flat, dim=2)
              
              # Flag to indicate we act in whitened space
              whitened = True

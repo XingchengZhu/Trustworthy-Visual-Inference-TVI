@@ -35,8 +35,7 @@ class Config:
     NUM_SUPPORT_SAMPLES = 1000
     SINKHORN_EPS = 0.1
     SINKHORN_MAX_ITER = 100
-    SINKHORN_EPS = 0.1
-    SINKHORN_MAX_ITER = 100
+    MAX_ITER = 100
     K_NEIGHBORS = 5
     METRIC_TYPE = "mahalanobis" # sinkhorn, euclidean, cosine, mahalanobis
     REACT_PERCENTILE = 90 # For feature clipping (React), clip at 90th percentile

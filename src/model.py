@@ -43,8 +43,13 @@ class ResNetBackbone(nn.Module):
         self.num_features = 512 * expansion
         
         # 4. Feature Normalization & FC
-        self.bn = nn.BatchNorm1d(self.num_features)
-        self.resnet.fc = nn.Linear(self.num_features, num_classes)
+        # 5. Projection Head for Contrastive Learning (SupCon)
+        # Map 512 -> 128 (Contrastive Space)
+        self.projection_head = nn.Sequential(
+            nn.Linear(self.num_features, self.num_features),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.num_features, 128)
+        )
         
     def forward(self, x):
         # Standard ResNet forward until layer4
@@ -65,7 +70,11 @@ class ResNetBackbone(nn.Module):
         # BN (Feature Norm)
         features = self.bn(features)
         
+        # Classification Logits
         logits = self.resnet.fc(features)
+        
+        # Projection for SupCon
+        projected = self.projection_head(features)
         
         # Return features before BN or after?
         # Usually for metric learning we want the normalized features that were used for classification.
@@ -75,4 +84,4 @@ class ResNetBackbone(nn.Module):
         # The OT module uses the 'x' (spatial features).
         # However, Center Loss needs the flattened features 'features'.
         
-        return x, features, logits
+        return x, features, logits, projected

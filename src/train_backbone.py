@@ -7,44 +7,75 @@ from src.config import Config
 from src.dataset import get_dataloaders
 from src.model import ResNetBackbone
 
-def train_one_epoch(model, loader, criterion, center_loss_func, optimizer, optimizer_center, device):
+def train_one_epoch(model, loader, criterion, center_loss_func, supcon_loss_func, optimizer, optimizer_center, device):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     
-    # Weight for Center Loss
+    # Weights
     weight_center = Config.CENTER_LOSS_WEIGHT
+    weight_supcon = 1.0 # Standard weight
     
     for images, labels in tqdm(loader, desc="Training", leave=False):
-        images, labels = images.to(device), labels.to(device)
+        # Handle Two Crops
+        if isinstance(images, list):
+            # images is [crop1, crop2], each (B, C, H, W)
+            # Stack them: (2B, C, H, W)
+            images = torch.cat(images, dim=0)
+            labels = labels.to(device)
+            # Labels also need doubling for CE?
+            # Usually we use labels for SupCon (B), but for CE we have 2B logits.
+            # So double labels for CE.
+            labels_ce = torch.cat([labels, labels], dim=0)
+            bsz = labels.shape[0]
+        else:
+            images, labels = images.to(device), labels.to(device)
+            labels_ce = labels
+            bsz = labels.shape[0]
+            
+        images = images.to(device)
         
         optimizer.zero_grad()
         optimizer_center.zero_grad()
         
-        # Model returns: spatial_features, flat_features, logits
-        _, features, logits = model(images)
+        # Model returns: spatial, flat, logits, projected
+        _, features, logits, projected = model(images)
         
-        loss_cls = criterion(logits, labels)
-        loss_center = center_loss_func(features, labels)
+        # 1. SupCon Loss (on Projected Features)
+        if isinstance(images, torch.Tensor) and images.shape[0] == 2 * bsz:
+             # Split for SupCon format: (B, 2, Dim)
+             f1, f2 = torch.split(projected, [bsz, bsz], dim=0)
+             features_supcon = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1) # (B, 2, D)
+             loss_supcon = supcon_loss_func(features_supcon, labels)
+        else:
+             # Standard training fallback? Or just skip SupCon if single view
+             loss_supcon = torch.tensor(0.0).to(device)
+
+        # 2. CE Loss (on All Views)
+        loss_cls = criterion(logits, labels_ce)
         
-        loss = loss_cls + weight_center * loss_center
+        # 3. Center Loss (on Flat Features)
+        loss_center = center_loss_func(features, labels_ce)
+        
+        # Total Loss
+        loss = loss_cls + weight_center * loss_center + weight_supcon * loss_supcon
         
         loss.backward()
         optimizer.step()
-        # Create a new optimizer for center loss or just step it manually if it were simple param.
-        # But usually we use an optimizer.
+        
+        # Center Loss Update
         for param in center_loss_func.parameters():
-            # Gradients for centers are computed in backward()
-            # We need to update them. standard SGD for centers.
-            # Usually lr for centers is 0.5
-            pass
+             # Centers update handled by optimizer_center
+             pass
         optimizer_center.step()
         
         running_loss += loss.item()
         _, predicted = torch.max(logits.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
+        
+        # Accuracy tracking (use all views)
+        total += labels_ce.size(0)
+        correct += (predicted == labels_ce).sum().item()
         
     return running_loss / len(loader), 100 * correct / total
 
@@ -57,8 +88,8 @@ def validate(model, loader, criterion, device):
     with torch.no_grad():
         for images, labels in tqdm(loader, desc="Validation", leave=False):
             images, labels = images.to(device), labels.to(device)
-            # Unpack 3 values
-            _, _, logits = model(images)
+            # Unpack 4 values
+            _, _, logits, _ = model(images)
             loss = criterion(logits, labels)
             
             running_loss += loss.item()
@@ -137,21 +168,22 @@ def main():
     logger.info(f"Using device: {device}")
     logger.info(f"Starting Training on {Config.DATASET_NAME}")
     
-    train_loader, _, test_loader = get_dataloaders()
+    # Enable Contrastive Loader (Two Crops)
+    train_loader, _, test_loader = get_dataloaders(use_contrastive=True)
     
     # Use Config.NUM_CLASSES
-    from src.loss import CenterLoss
+    from src.loss import CenterLoss, SupConLoss
     
     # Model Setup
     from src.model import ResNetBackbone
     model = ResNetBackbone(num_classes=Config.NUM_CLASSES).to(device)
     
     criterion = nn.CrossEntropyLoss()
-    center_loss = CenterLoss(num_classes=Config.NUM_CLASSES, feat_dim=model.num_features, use_gpu=True)
-    center_loss = center_loss.to(device)
+    center_loss = CenterLoss(num_classes=Config.NUM_CLASSES, feat_dim=model.num_features, use_gpu=True).to(device)
+    supcon_loss = SupConLoss(temperature=0.1).to(device) # Temp 0.1 is standard
     
     optimizer = optim.SGD(model.parameters(), lr=Config.LR, momentum=Config.MOMENTUM, weight_decay=Config.WEIGHT_DECAY)
-    optimizer_center = optim.SGD(center_loss.parameters(), lr=0.5) # Alpha usually 0.5
+    optimizer_center = optim.SGD(center_loss.parameters(), lr=0.5) 
     
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.EPOCHS)
     
@@ -161,8 +193,10 @@ def main():
     train_losses, train_accs = [], []
     val_losses, val_accs = [], []
     
+    logger.info("Enabled Joint Training: CE + CenterLoss + SupCon")
+    
     for epoch in range(Config.EPOCHS):
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, center_loss, optimizer, optimizer_center, device)
+        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, center_loss, supcon_loss, optimizer, optimizer_center, device)
         val_loss, val_acc = validate(model, test_loader, criterion, device)
         
         train_losses.append(train_loss)
@@ -185,6 +219,13 @@ def main():
         plot_metrics(train_losses, train_accs, val_losses, val_accs)
             
     logger.info(f"Training Complete. Best Accuracy: {best_acc:.2f}%")
+    
+    # Auto-Invalidate Support Cache
+    # Since model changed, old support set is invalid.
+    support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
+    if os.path.exists(support_path):
+        os.remove(support_path)
+        logger.info(f"Deleted stale support cache: {support_path}")
 
 if __name__ == "__main__":
     main()

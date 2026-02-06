@@ -7,19 +7,10 @@ class OTMetric:
     def __init__(self, device='cpu'):
         self.device = device
         
-    def compute_batch_ot(self, query_features, support_features, support_labels, virtual_outliers=None):
+    def compute_batch_ot(self, query_features, support_features, support_labels, virtual_outliers=None, precision_matrix=None):
         """
-        Computes OT distances in batch mode on GPU.
-        
-        query_features: (B, C, H, W)
-        support_features: (S, C, H, W)
-        support_labels: (S,)
-        virtual_outliers: (Num_VO, C, H, W) - Optional virtual outlier prototypes
-        
-        Returns: 
-            distances (B, K): Distance to top-k ID neighbors
-            topk_indices (B, K): Indices of top-k ID neighbors
-            vo_distances (B, Num_VO or top-k-vo): Distance to virtual outliers (if provided)
+        ...
+        precision_matrix: (D, D) - Optional for Mahalanobis
         """
         B, C, H, W = query_features.shape
         S = support_features.shape[0]
@@ -29,72 +20,124 @@ class OTMetric:
         q_flat = query_features.view(B, C, N).permute(0, 2, 1).contiguous() # (B, N, C)
         s_flat = support_features.view(S, C, N).permute(0, 2, 1).contiguous() # (S, N, C)
         
-        # Normalize for Cosine/Metric
-        q_norm = torch.nn.functional.normalize(q_flat, dim=2)
-        s_norm = torch.nn.functional.normalize(s_flat, dim=2)
+        # If Mahalanobis, project features first!
+        # D_mah(x, y) = sqrt( (x-y) P (x-y).T ) = || L(x-y) || where P = L.T L
+        # Let's perform Cholesky decomp on P? Or Eigen?
+        # Actually P is derived from inv(Cov).
+        # We can just matmul features with L where L @ L.T = P?
+        # Or easier: matmul features with P_sqrt.
+        # But we passed P (precision).
         
-        # 2. Coarse Filtering via Spatial Pyramid Pooling (SPP)
-        # SPP levels: 1x1, 2x2, 4x4
-        # This captures structure better than just GAP (1x1)
+        if Config.METRIC_TYPE == 'mahalanobis' and precision_matrix is not None:
+             # Decompose P = U @ S @ U.T
+             # Transform T = U @ sqrt(S)
+             # Then || T x ||^2 = x.T T.T T x = x.T (U sqrt(S) sqrt(S) U.T) x = x.T P x.
+             # So we compute T.
+             # Since P is PSD, use Eig or Cholesky.
+             # Let's use svd for stability.
+             # NOTE: Doing this every batch is slow? P is constant.
+             # We should cache T. But precision_matrix passed is tensor.
+             # Let's assume caller handles efficiency or we do it quickly (512x512 is fast).
+             
+             # Actually, just compute P_sqrt.
+             # Or even easier: P is (D, D).
+             # q_flat is (B, 1, D).
+             # q_transformed = q_flat @ P_sqrt ? No.
+             
+             # Let's trust Euclidean on Transformed features.
+             # T = torch.linalg.cholesky(precision_matrix) # Lower triangular L @ L.T = P
+             # transformed_x = x @ L
+             
+             try:
+                 L = torch.linalg.cholesky(precision_matrix)
+             except:
+                 # Precision matrix might not be perfectly PD?
+                 # Fallback to SVD
+                 u, s, v = torch.svd(precision_matrix)
+                 L = torch.matmul(u, torch.diag(torch.sqrt(s)))
+                 
+             # Transform features
+             # q_flat: (B, N, C). C=512.
+             # L: (C, C).
+             # q_new = q @ L
+             q_flat = torch.matmul(q_flat, L)
+             s_flat = torch.matmul(s_flat, L)
+             
+             # Proceed with Euclidean!
+             # We SKIP normalization because Mahalanobis relies on magnitude variance.
+             q_norm = q_flat
+             s_norm = s_flat
+             
+        else:
+            # Normalize for Cosine/Metric
+            q_norm = torch.nn.functional.normalize(q_flat, dim=2)
+            s_norm = torch.nn.functional.normalize(s_flat, dim=2)
         
+        # Define SPP function (Used for Coarse Filtering in all modes)
         def spp_func(x):
             # x: (B, C, H, W)
             levels = [1, 2, 4]
             pooled = []
             for k in levels:
-                # Max or Avg pooling? Proposal implies capturing features. Avg is standard for descriptors.
-                # Use AdaptiveAvgPool2d to get fixed size kxk
                 p = torch.nn.functional.adaptive_avg_pool2d(x, (k, k))
                 # Flatten: (B, C, k, k) -> (B, C, k*k)
                 p = p.view(x.size(0), C, -1)
                 pooled.append(p)
-            # Concat: (B, C, 1+4+16=21) -> (B, C, 21)
-            # Flatten to vector: (B, C*21)
             return torch.cat(pooled, dim=2).view(x.size(0), -1)
 
-        q_spp = spp_func(query_features)   # (B, D_spp)
-        s_spp = spp_func(support_features) # (S, D_spp)
+        # 2. SPP (Skip for Mahalanobis/Flat features to keep it simple, or apply SPP on transformed?)
+        if Config.METRIC_TYPE == 'mahalanobis':
+             # If input was 1x1, SPP makes no sense or just repeats. 
+             # We just use q_norm directly.
+             q_spp = q_norm.view(B, -1)
+             s_spp = s_norm.view(S, -1)
+             k = min(Config.K_NEIGHBORS, S)
+             
+        else:
+             q_spp = spp_func(query_features)
+             s_spp = spp_func(support_features)
+             q_spp = torch.nn.functional.normalize(q_spp, dim=1)
+             s_spp = torch.nn.functional.normalize(s_spp, dim=1)
+             k = min(Config.K_NEIGHBORS, S)
         
-        q_spp = torch.nn.functional.normalize(q_spp, dim=1)
-        s_spp = torch.nn.functional.normalize(s_spp, dim=1)
-        
-        # Sim Matrix: (B, S)
+        # Sim Matrix
         sim_coarse = torch.mm(q_spp, s_spp.T)
+        _, topk_indices = torch.topk(sim_coarse, k, dim=1)
+
+        # ... (Rest of Euclidean logic matches)
+        # Use Euclidean if Metric is Mahalanobis (since we transformed features)
         
-        # Top K
-        k = min(Config.K_NEIGHBORS, S)
-        _, topk_indices = torch.topk(sim_coarse, k, dim=1) # (B, K)
-        
-        # 3. Batch Construction for OT (ID Samples)
-        # Gather Query: repeat each query K times -> (B, K, N, C)
+        # Batch Construction
         q_batch = q_norm.unsqueeze(1).expand(-1, k, -1, -1) 
-        
-        # Gather Support: Select topk neighbors -> (B, K, N, C)
         s_batch = s_norm[topk_indices] 
-        
-        # Flatten to (B*K, N, C) for batched OT
         curr_batch_size = B * k
         q_in = q_batch.reshape(curr_batch_size, N, C)
         s_in = s_batch.reshape(curr_batch_size, N, C)
         
-        # 4. Compute Cost Matrix (Cosine Distance) & Sinkhorn (ID)
         scores = torch.bmm(q_in, s_in.transpose(1, 2))
-        M = 1 - scores
-        M = torch.clamp(M, min=0.0)
+        M = 1 - scores # This is Cosine distance logic, INVALID for Mahalanobis?
         
-        distances = None
-        if Config.METRIC_TYPE == 'sinkhorn':
-            dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
-            distances = dist_flat.view(B, k)
+        if Config.METRIC_TYPE == 'mahalanobis':
+             # Use Euclidean Distance on Transformed Features
+             # q_in, s_in are (BS, 1, D)
+             dists = torch.norm(q_in - s_in, dim=2, p=2) # (BS, 1) -> (BS,)
+             distances = dists.view(B, k)
+             
+        elif Config.METRIC_TYPE == 'sinkhorn':
+             # ...
+             M = torch.clamp(M, min=0.0)
+             dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
+             distances = dist_flat.view(B, k)
         elif Config.METRIC_TYPE == 'euclidean':
-            # Fallback to simple euclidean on SPP features for speed/baseline
-            s_spp_k = s_spp[topk_indices] # (B, K, Dim)
-            q_spp_k = q_spp.unsqueeze(1).expand(-1, k, -1)
-            distances = torch.norm(q_spp_k - s_spp_k, dim=2, p=2)
+             # ... SPP based euclidean ...
+             # But here we want Flat Feature Euclidean?
+             # q_in, s_in are flat features (if using flat input).
+             dists = torch.norm(q_in - s_in, dim=2, p=2) 
+             distances = dists.view(B, k)
         elif Config.METRIC_TYPE == 'cosine':
-            sim_values = torch.gather(sim_coarse, 1, topk_indices)
-            distances = 1.0 - sim_values
-            distances = torch.clamp(distances, min=0.0)
+             sim_values = torch.gather(sim_coarse, 1, topk_indices)
+             distances = 1.0 - sim_values
+             distances = torch.clamp(distances, min=0.0)
         else:
              raise ValueError(f"Unknown Metric Type: {Config.METRIC_TYPE}")
              
@@ -114,8 +157,32 @@ class OTMetric:
             v_norm = torch.nn.functional.normalize(v_flat, dim=2)
             
             # Coarse filter for VOs
-            v_spp = spp_func(virtual_outliers)
-            v_spp = torch.nn.functional.normalize(v_spp, dim=1)
+            if Config.METRIC_TYPE == 'mahalanobis' and precision_matrix is not None:
+                 # Calculate L again? Or assume L is cached/available?
+                 # We need to re-compute L or pass it. 
+                 # Optimization: Pass L instead of P? 
+                 # For now, re-compute L (fast)
+                 try:
+                     L = torch.linalg.cholesky(precision_matrix)
+                 except:
+                     u, s, v = torch.svd(precision_matrix)
+                     L = torch.matmul(u, torch.diag(torch.sqrt(s)))
+                 
+                 # Project VOS
+                 # v_flat: (V, N, C) -> (V, N, C)
+                 v_flat = torch.matmul(v_flat, L)
+                 v_norm = v_flat # already projected
+                 
+                 # SPP for VO (Projected)
+                 v_spp = v_norm.view(V, -1)
+                 
+                 # Recalculate q_spp using updated q_norm (projected)?
+                 # q_spp is already set above to q_norm.view(-1).
+                 # So we are consistent.
+                 
+            else:
+                 v_spp = spp_func(virtual_outliers)
+                 v_spp = torch.nn.functional.normalize(v_spp, dim=1)
             
             sim_vo = torch.mm(q_spp, v_spp.T) # (B, V)
             

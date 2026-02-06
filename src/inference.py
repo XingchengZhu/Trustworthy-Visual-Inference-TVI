@@ -26,15 +26,17 @@ def load_backbone(device, logger):
     model.eval()
     return model
 
-def build_support_set(model, support_loader, device, logger):
+def build_support_set(model, support_loader, device, logger, rebuild_support=False):
     support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
     
-    if os.path.exists(support_path):
+    if os.path.exists(support_path) and not rebuild_support:
         logger.info(f"Loading cached support set from {support_path}")
         data = torch.load(support_path, map_location=device)
         # Check if new cache format
-        if 'virtual_outliers' in data:
-            return data['features'], data['labels'], data['virtual_outliers'], data['gamma_scale']
+        if 'virtual_outliers' in data and 'precision_matrix' in data:
+            # Handle backward compatibility with default react=1e9 (no clip)
+            react = data.get('react_threshold', 1e9)
+            return data['features'], data['labels'], data['virtual_outliers'], data['gamma_scale'], data['precision_matrix'], react
         else:
             logger.warning("Old cache format found. Rebuilding...")
 
@@ -53,7 +55,10 @@ def build_support_set(model, support_loader, device, logger):
         for images, labels in tqdm(support_loader, desc="Extracting Support", leave=False):
             images = images.to(device)
             # Model returns: spatial_feats, flat, logits
-            features, _, _ = model(images) 
+            _, features, _ = model(images) 
+            # Use Flat BN Features (aligned with Center Loss)
+            # Reshape to (B, C, 1, 1) for OTMetric compatibility
+            features = features.unsqueeze(-1).unsqueeze(-1) 
             
             for i in range(images.size(0)):
                 lbl = labels[i].item()
@@ -70,89 +75,132 @@ def build_support_set(model, support_loader, device, logger):
     support_features = torch.stack(support_features).to(device)
     support_labels = torch.tensor(support_labels).to(device)
     
-    # --- Virtual Outlier Generation & Adaptive Gamma ---
-    # 1. Prototypes
+    # --- React Implementation (Clip High Activations) ---
+    logger.info(f"Applying React (Rectified Activation) w/ p={Config.REACT_PERCENTILE}")
+    # Flatten strictly for stats
+    flat_support = support_features.view(support_features.size(0), -1)
+    # Find global percentile threshold
+    # Note: quantile requires float
+    clip_threshold = torch.quantile(flat_support, Config.REACT_PERCENTILE / 100.0)
+    logger.info(f"React Threshold: {clip_threshold:.4f}")
+    
+    # Clip Support Features
+    support_features = torch.clamp(support_features, max=clip_threshold)
+    
+    # --- Robust Mahalanobis (Tied statistics) ---
+    # We use FLATTENED, RECTIFIED features for covariance
+    # Re-compute prototypes based on clipped features
     prototypes = []
+    centered_features = []
+    
     for i in range(Config.NUM_CLASSES):
-        # Stack features for class i: (N_c, C, H, W)
-        feats = torch.stack(class_features[i]) 
-        # Mean: (C, H, W)
-        proto = torch.mean(feats, dim=0)
-        prototypes.append(proto)
-    prototypes = torch.stack(prototypes).to(device) # (K, C, H, W)
+        mask = (support_labels == i)
+        # (N_c, C, 1, 1) -> (N_c, C)
+        class_feats = support_features[mask].view(mask.sum(), -1)
+        
+        # Mean
+        mu = class_feats.mean(dim=0)
+        prototypes.append(mu)
+        
+        # Center
+        centered_features.append(class_feats - mu)
+        
+    prototypes = torch.stack(prototypes) # (K, C)
+    centered_features = torch.cat(centered_features, dim=0) # (N, C)
+    
+    # Covariance: (X.T @ X) / (N - 1)
+    N_samples = centered_features.size(0)
+    cov = torch.matmul(centered_features.T, centered_features) / (N_samples - 1)
+    
+    # Robust Shrinkage (Ledoit-Wolf-like diagonal loading)
+    # This prevents singular matrix and stabilizes inverse
+    alpha = 1e-4
+    cov = (1 - alpha) * cov + alpha * torch.eye(cov.size(0)).to(device)
+    
+    # Precision Matrix
+    try:
+        precision_matrix = torch.inverse(cov)
+    except RuntimeError:
+        logger.warning("Covariance matrix is singular! Using pseudo-inverse.")
+        precision_matrix = torch.pinverse(cov)
+        
+    logger.info("Computed Robust Precision Matrix.")
+    
+    # Re-shape Prototypes for VOS (K, C, 1, 1)
+    prototypes = prototypes.view(Config.NUM_CLASSES, -1, 1, 1)
     
     # 2. Global Center
-    global_center = torch.mean(prototypes, dim=0) # (C, H, W)
+    global_center = torch.mean(prototypes, dim=0) # (C, 1, 1)
     
-    # 3. Virtual Outliers (Boundary Sampling)
-    # v_k = p_k + beta * (p_nearest - p_k) + epsilon
-    # Instead of global center, we target the nearest other class (boundary).
+    # 3. Virtual Outliers
+    vos_type = getattr(Config, 'VOS_TYPE', 'radial') # Default to radial if not set
     beta = Config.VO_BETA
-    
-    virtual_outliers_list = []
     num_vos_per_class = 5 
+    virtual_outliers_list = []
     
-    # Pre-compute pairwise distances between prototypes to find nearest neighbors
-    # prototypes: (K, C, H, W) -> flatten to (K, D)
-    K_classes = prototypes.size(0)
-    flat_protos = prototypes.view(K_classes, -1)
-    # Euclidean Matrix
-    # dist[i,j] = ||p_i - p_j||
-    dists_proto = torch.cdist(flat_protos, flat_protos)
-    # Mask diagonal
-    dists_proto.fill_diagonal_(float('inf'))
-    
-    # Indices of nearest neighbors
-    _, nearest_indices = torch.min(dists_proto, dim=1)
-    
-    for i in range(K_classes):
-        p_k = prototypes[i]
-        p_near = prototypes[nearest_indices[i]]
+    if vos_type == 'boundary':
+        # Boundary Sampling: Target nearest other class
+        K_classes = prototypes.size(0)
+        flat_protos = prototypes.view(K_classes, -1)
+        dists_proto = torch.cdist(flat_protos, flat_protos)
+        dists_proto.fill_diagonal_(float('inf'))
+        _, nearest_indices = torch.min(dists_proto, dim=1)
         
-        # Direction to nearest neighbor
-        direction = p_near - p_k
-        
-        for _ in range(num_vos_per_class):
-            # Sample along the path to the boundary (around 0.5 * distance?)
-            # Usually Boundary VOS places points near the decision boundary.
-            # v = p_k + lambda * (p_near - p_k) + noise.
-            # lambda should be around 0.5 if beta is meant to be boundary.
-            # Use Config.VO_BETA as a scaling factor around 0.5? 
-            # Or assume VO_BETA is the lambda. Default 0.5?
-            # Let's use Beta as the interpolation factor directly.
-            # If Beta=0.5, it's exactly middle.
+        for i in range(K_classes):
+            p_k = prototypes[i]
+            p_near = prototypes[nearest_indices[i]]
+            direction = p_near - p_k
             
-            # Add random jitter to Beta
-            lambda_sample = torch.normal(mean=beta, std=0.1) # e.g. 0.5 +/- 0.1
+            for _ in range(num_vos_per_class):
+                # Use beta + N(0, 0.1)
+                lambda_sample = beta + torch.randn(1).item() * 0.1
+                epsilon = torch.randn_like(p_k) * 0.1 
+                vo = p_k + lambda_sample * direction + epsilon
+                virtual_outliers_list.append(vo)
+                
+    else: # radial
+        # Classic Radial Sampling: p_k + beta * (p_k - global_center)
+        # Pushes outliers outward from center
+        for proto in prototypes:
+            direction = proto - global_center
             
-            epsilon = torch.randn_like(p_k) * 0.1 
-            vo = p_k + lambda_sample * direction + epsilon
-            virtual_outliers_list.append(vo)
+            for _ in range(num_vos_per_class):
+                epsilon = torch.randn_like(proto) * 0.1 
+                vo = proto + beta * direction + epsilon
+                virtual_outliers_list.append(vo)
             
     virtual_outliers = torch.stack(virtual_outliers_list)
     
-    # 4. Adaptive Gamma
-    # Compute mean intra-class distance (or simplified global mean distance)
-    # Ideally: compute pair-wise distances in support set... expensive.
-    # Approximation: Inverse of mean distance between prototypes? No, that's inter-class.
-    # Approximation: Reuse OTMetric?
-    # Let's use a heuristic: 1 / N_features?
-    # Better: 1 / Mean( || p_i - p_global || )
-    # Let's stick to the Plan: "Based on support set internal stats".
-    # We'll use the mean L2 distance of samples to their prototypes as sigma.
-    # gamma = 1 / sigma^2 ?? Or just 1/mean_dist.
+    # Clip VOS too? Yes, consistent with feature space.
+    virtual_outliers = torch.clamp(virtual_outliers, max=clip_threshold)
     
+    # 4. Adaptive Gamma (using Mahalanobis/Euclidean logic)
+    # Recalculate based on clipped features
     # Let's compute average distance of samples to their class prototype
     total_dist = 0.0
     count = 0
-    # Sampling for speed
+    
+    # Pre-compute Cholesky of Precision for Mahalanobis Distance check
+    L_inv = torch.linalg.cholesky(precision_matrix) # P = L @ L.T ... wait.
+    # We want dist = (x-u).T P (x-u) = || L.T(x-u) ||^2 where P = L @ L.T
+    # So we multiply by L.T. 
+    # Actually if P = U S U.T, transform is U sqrt(S).
+    
     for i in range(Config.NUM_CLASSES):
-        # Take first 10 samples
-        samples = torch.stack(class_features[i][:10]).to(device)
-        proto = prototypes[i].unsqueeze(0)
-        # Dist (Euclidean for simplicity of scale)
-        d = torch.norm(samples - proto, p=2, dim=[1,2,3])
-        total_dist += torch.sum(d).item()
+        # Take first 10 samples (clipped)
+        mask = (support_labels == i)
+        samples = support_features[mask][:10].view(-1, 512)
+        proto = prototypes[i].view(1, 512)
+        
+        # Mahalanobis Distance
+        diff = samples - proto
+        # diff: (N, 512)
+        # Dist = sum (diff @ P) * diff
+        # (N, D) @ (D, D) -> (N, D)
+        term1 = torch.matmul(diff, precision_matrix)
+        dists = torch.sum(term1 * diff, dim=1)
+        
+        total_dist += torch.sum(dists).item()
         count += len(samples)
     
     avg_dist = total_dist / count
@@ -167,11 +215,13 @@ def build_support_set(model, support_loader, device, logger):
         'features': support_features, 
         'labels': support_labels,
         'virtual_outliers': virtual_outliers,
-        'gamma_scale': gamma_scale
+        'gamma_scale': gamma_scale,
+        'precision_matrix': precision_matrix,
+        'react_threshold': clip_threshold
     }, support_path)
     logger.info(f"Saved support set to {support_path}")
     
-    return support_features, support_labels, virtual_outliers, gamma_scale
+    return support_features, support_labels, virtual_outliers, gamma_scale, precision_matrix, clip_threshold
 
 def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
     uncertainties = np.array(uncertainties).flatten()
@@ -202,7 +252,7 @@ def plot_inference_metrics(uncertainties, correct_mask, ood_uncertainties=None):
     plt.savefig(os.path.join(results_dir, 'uncertainty_distribution.png'))
     plt.close()
 
-def evaluate(model, test_loader, support_features, support_labels, virtual_outliers, gamma_scale, device, logger, args):
+def evaluate(model, test_loader, support_features, support_labels, virtual_outliers, gamma_scale, precision_matrix, clip_threshold, device, logger, args):
     ot_metric = OTMetric(device)
     evidence_extractor = EvidenceExtractor(num_classes=Config.NUM_CLASSES)
     fusion_module = DempsterShaferFusion(num_classes=Config.NUM_CLASSES)
@@ -239,8 +289,13 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             # 1. Backbone
             # Return: spatial, flat, logits
-            spatial_feats, _, logits = model(images)
-            features = spatial_feats # Alias for OTMetric
+            _, flat_feats, logits = model(images)
+            # Use Flat BN Features for OT
+            features = flat_feats.unsqueeze(-1).unsqueeze(-1)
+            
+            # React Clipping
+            if clip_threshold > 0:
+                features = torch.clamp(features, max=clip_threshold)
             
             # 2. Parametric
             evidence_param = evidence_extractor.get_parametric_evidence(logits)
@@ -264,7 +319,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             if not args.baseline:
                 # 3. Non-Parametric with Virtual Outliers
-                ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers)
+                ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers, precision_matrix=precision_matrix), precision_matrix=precision_matrix)
                 
                 # Use Adaptive Gamma & Virtual Outlier Discounting
                 evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
@@ -417,8 +472,12 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         try:
             with torch.no_grad():
                 for images, labels in current_ood_loop_func():
-                    spatial_feats, _, logits = model(images)
-                    features = spatial_feats
+                    _, flat_feats, logits = model(images)
+                    features = flat_feats.unsqueeze(-1).unsqueeze(-1)
+                    
+                    # React Clipping
+                    if clip_threshold > 0:
+                         features = torch.clamp(features, max=clip_threshold)
                     
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
                     alpha_param = evidence_param + 1
@@ -432,7 +491,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     min_ot_dist = torch.zeros_like(u_fuse)
                     
                     if not args.baseline:
-                        ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(spatial_feats, support_features, support_labels, virtual_outliers=virtual_outliers)
+                        ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers, precision_matrix=precision_matrix)
                         
                         evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
                             ot_dists, topk_indices, support_labels, 
@@ -600,6 +659,7 @@ def main():
     parser.add_argument("--config", type=str, default="conf/cifar10.json", help="Path to config file")
     parser.add_argument("--task_note", type=str, default="Base", help="Note for the experiment (e.g. Ablation, Baseline)")
     parser.add_argument("--baseline", action="store_true", help="Run in baseline mode (only Parametric branch, skip OT/Fusion)")
+    parser.add_argument("--rebuild_support", action="store_true", help="Force rebuilding of the support set cache")
     parser.add_argument("--log_suffix", type=str, default=None, help="Suffix for the log file name (e.g. experiment_baseline.log)")
     
     # Ablation / Sensitivity Overrides
@@ -657,11 +717,11 @@ def main():
     model = load_backbone(device, logger)
     
     # Build Support Set
-    support_features, support_labels, virtual_outliers, gamma_scale = build_support_set(model, support_loader, device, logger)
+    support_features, support_labels, virtual_outliers, gamma_scale, precision_matrix, clip_threshold = build_support_set(model, support_loader, device, logger, rebuild_support=args.rebuild_support)
     
     # Run Evaluation
     # Run Evaluation
-    evaluate(model, test_loader, support_features, support_labels, virtual_outliers, gamma_scale, device, logger, args)
+    evaluate(model, test_loader, support_features, support_labels, virtual_outliers, gamma_scale, precision_matrix, clip_threshold, device, logger, args)
 
 if __name__ == "__main__":
     main()

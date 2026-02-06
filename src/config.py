@@ -38,7 +38,8 @@ class Config:
     SINKHORN_EPS = 0.1
     SINKHORN_MAX_ITER = 100
     K_NEIGHBORS = 5
-    METRIC_TYPE = "sinkhorn" # sinkhorn, euclidean, cosine
+    METRIC_TYPE = "mahalanobis" # sinkhorn, euclidean, cosine, mahalanobis
+    REACT_PERCENTILE = 90 # For feature clipping (React), clip at 90th percentile
     
     # Evidence
     EVIDENCE_SCALE = 1.0
@@ -49,7 +50,8 @@ class Config:
     
     # Advanced / Metrics Learning
     CENTER_LOSS_WEIGHT = 0.005 # Default recommendation is 0.003-0.01 for ResNet
-    VO_BETA = 0.5 # Boundary VOS (Midpoint = 0.5)
+    VOS_TYPE = "radial" # "radial" (classic) or "boundary" (between classes)
+    VO_BETA = 1.0 # 1.0 for Radial, 0.5 for Boundary
 
     @classmethod
     def load_config(cls, config_path):

@@ -3,7 +3,15 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .config import Config
 
-def get_dataloaders():
+class TwoCropTransform:
+    """Create two crops of the same image"""
+    def __init__(self, transform):
+        self.transform = transform
+
+    def __call__(self, x):
+        return [self.transform(x), self.transform(x)]
+
+def get_dataloaders(use_contrastive=False):
     # Standard augmentation for training
     train_transform = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -33,6 +41,9 @@ def get_dataloaders():
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
         
+        if use_contrastive:
+            transform_train = TwoCropTransform(transform_train)
+        
         train_dataset = datasets.CIFAR10(root=Config.DATA_DIR, train=True, download=True, transform=transform_train)
         
         # Split train into train/support if needed, but typically we use full train for support extraction
@@ -44,7 +55,7 @@ def get_dataloaders():
         # We'll use the train dataset for support loader, but maybe with test transform (no aug)?
         # Ideally support set should be clean features.
         support_dataset = datasets.CIFAR10(root=Config.DATA_DIR, train=True, download=True, transform=transform_test)
-
+    
     elif Config.DATASET_NAME == 'cifar100':
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -57,6 +68,9 @@ def get_dataloaders():
             transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ])
         
+        if use_contrastive:
+            transform_train = TwoCropTransform(transform_train)
+            
         train_dataset = datasets.CIFAR100(root=Config.DATA_DIR, train=True, download=True, transform=transform_train)
         test_dataset = datasets.CIFAR100(root=Config.DATA_DIR, train=False, download=True, transform=transform_test)
         support_dataset = datasets.CIFAR100(root=Config.DATA_DIR, train=True, download=True, transform=transform_test)
@@ -81,6 +95,9 @@ def get_dataloaders():
             transforms.ToTensor(),
             normalize,
         ])
+        
+        if use_contrastive:
+            transform_train = TwoCropTransform(transform_train)
 
         # Paths
         train_dir = os.path.join(Config.DATA_DIR, 'imagenet100', 'train')
@@ -103,6 +120,9 @@ def get_dataloaders():
             transforms.ToTensor(),
             transforms.Normalize((0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970)),
         ])
+        
+        if use_contrastive:
+            transform_train = TwoCropTransform(transform_train)
         
         train_dataset = datasets.SVHN(root=Config.DATA_DIR, split='train', download=True, transform=transform_train)
         test_dataset = datasets.SVHN(root=Config.DATA_DIR, split='test', download=True, transform=transform_test)

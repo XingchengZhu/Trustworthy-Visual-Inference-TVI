@@ -95,6 +95,9 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
 
 
     logger.info("Building Support Set Features...")
+    
+    samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
+    
     # Temporary storage for ALL candidates
     candidate_features_per_class = {i: [] for i in range(Config.NUM_CLASSES)}
     
@@ -211,10 +214,12 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     logger.info("Computed Robust Precision Matrix (on GAP features).")
     
     # Re-shape Prototypes for VOS (K, C, 1, 1)
-    prototypes = prototypes.view(Config.NUM_CLASSES, -1, 1, 1)
+    # Ensure they match spatial resolution of support set for OT
+    H, W = support_features.shape[2], support_features.shape[3]
+    prototypes = prototypes.view(Config.NUM_CLASSES, -1, 1, 1).expand(-1, -1, H, W).clone()
     
-    # 2. Global Center
-    global_center = torch.mean(prototypes, dim=0) # (C, 1, 1)
+    # 2. Global Center (Mean across classes)
+    global_center = torch.mean(prototypes, dim=0) # (C, H, W)
     
     # 3. Virtual Outliers
     vos_type = getattr(Config, 'VOS_TYPE', 'radial') # Default to radial if not set
@@ -273,8 +278,11 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     for i in range(Config.NUM_CLASSES):
         # Take first 10 samples (clipped)
         mask = (support_labels == i)
-        samples = support_features[mask][:10].view(-1, 512)
-        proto = prototypes[i].view(1, 512)
+        # Use GAP for Gamma Calc (matches Precision Matrix)
+        # support_features: (N, C, H, W) -> (N, C)
+        samples = support_features[mask][:10].mean(dim=(2, 3)) 
+        # prototypes: (K, C, H, W) -> (C) -> (1, C)
+        proto = prototypes[i].mean(dim=(1, 2)).view(1, 512)
         
         # Mahalanobis Distance
         diff = samples - proto

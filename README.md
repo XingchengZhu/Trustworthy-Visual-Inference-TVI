@@ -1,4 +1,7 @@
 # Trustworthy Visual Inference (TVI)
+> Use SupCon + Center Loss + React + Robust Mahalanobis for OOD Detection.
+
+Last Updated: 2026-02-06 (SupCon Integrated)
 
 This project implements a **Trustworthy Visual Inference** framework that synergizes **Parametric** (ResNet18) and **Non-Parametric** (Optimal Transport) representations via Evidential Fusion.
 

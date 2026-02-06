@@ -165,9 +165,12 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     logger.info(f"Applying React (Rectified Activation) w/ p={Config.REACT_PERCENTILE}")
     # Flatten strictly for stats: (N, C*H*W) or (N*H*W, C)?
     # We clip activations element-wise regardless of spatial position.
-    flat_support_all = support_features.view(-1)
+    # Move to CPU and use Numpy to avoid 'quantile() input tensor is too large' error
+    # PyTorch quantile has element limit even on CPU, Numpy is robust.
+    flat_support_all = support_features.view(-1).cpu().numpy()
     # Find global percentile threshold
-    clip_threshold = torch.quantile(flat_support_all, Config.REACT_PERCENTILE / 100.0)
+    val = np.percentile(flat_support_all, Config.REACT_PERCENTILE)
+    clip_threshold = torch.tensor(val, device=device, dtype=support_features.dtype)
     logger.info(f"React Threshold: {clip_threshold:.4f}")
     
     # Clip Support Features

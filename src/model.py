@@ -43,6 +43,9 @@ class ResNetBackbone(nn.Module):
         self.num_features = 512 * expansion
         
         # 4. Feature Normalization & FC
+        self.bn = nn.BatchNorm1d(self.num_features)
+        self.resnet.fc = nn.Linear(self.num_features, num_classes)
+        
         # 5. Projection Head for Contrastive Learning (SupCon)
         # Map 512 -> 128 (Contrastive Space)
         self.projection_head = nn.Sequential(

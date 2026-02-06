@@ -54,8 +54,8 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     with torch.no_grad():
         for images, labels in tqdm(support_loader, desc="Extracting Support", leave=False):
             images = images.to(device)
-            # Model returns: spatial_feats, flat, logits
-            _, features, _ = model(images) 
+            # Model returns: spatial_feats, flat, logits, projected
+            _, features, _, _ = model(images) 
             # Use Flat BN Features (aligned with Center Loss)
             # Reshape to (B, C, 1, 1) for OTMetric compatibility
             features = features.unsqueeze(-1).unsqueeze(-1) 
@@ -288,8 +288,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             # ... process one batch ...
             
             # 1. Backbone
-            # Return: spatial, flat, logits
-            _, flat_feats, logits = model(images)
+            # Return: spatial, flat, logits, projected
+            _, flat_feats, logits, _ = model(images)
             # Use Flat BN Features for OT
             features = flat_feats.unsqueeze(-1).unsqueeze(-1)
             
@@ -472,7 +472,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         try:
             with torch.no_grad():
                 for images, labels in current_ood_loop_func():
-                    _, flat_feats, logits = model(images)
+                    _, flat_feats, logits, _ = model(images)
                     features = flat_feats.unsqueeze(-1).unsqueeze(-1)
                     
                     # React Clipping

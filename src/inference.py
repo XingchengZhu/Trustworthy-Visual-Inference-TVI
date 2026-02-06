@@ -405,7 +405,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             if not args.baseline:
                 # 3. Non-Parametric with Virtual Outliers
-                ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers, precision_matrix=precision_matrix), precision_matrix=precision_matrix)
+                ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers, precision_matrix=precision_matrix)
                 
                 # Use Adaptive Gamma & Virtual Outlier Discounting
                 evidence_nonparam = evidence_extractor.get_non_parametric_evidence(

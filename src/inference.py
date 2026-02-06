@@ -26,6 +26,9 @@ def load_backbone(device, logger):
     model.eval()
     return model
 
+    model.eval()
+    return model
+
 def apply_bn_spatial(x, bn_layer):
     """
     Apply parameters of a BatchNorm1d layer to a spatial feature map (B, C, H, W).
@@ -44,6 +47,38 @@ def apply_bn_spatial(x, bn_layer):
     out = (x - mean) / torch.sqrt(var + eps) * weight + bias
     return out
 
+def kmeans_select(features, k, max_iter=20, device='cpu'):
+    """
+    Select k representative centroids using K-Means (PyTorch).
+    features: (N, D)
+    """
+    N, D = features.shape
+    if N <= k: return features
+    
+    # Init centroids (Random)
+    indices = torch.randperm(N)[:k]
+    centroids = features[indices].clone()
+    
+    for _ in range(max_iter):
+        # Assign to nearest centroid
+        # dists: (N, k)
+        dists = torch.cdist(features, centroids)
+        labels = torch.argmin(dists, dim=1)
+        
+        # Update centroids
+        new_centroids = []
+        for i in range(k):
+            mask = (labels == i)
+            if mask.sum() > 0:
+                new_centroids.append(features[mask].mean(dim=0))
+            else:
+                # Re-init empty cluster
+                random_idx = torch.randint(0, N, (1,)).item()
+                new_centroids.append(features[random_idx])
+        centroids = torch.stack(new_centroids)
+        
+    return centroids
+
 def build_support_set(model, support_loader, device, logger, rebuild_support=False):
     support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
     
@@ -60,38 +95,67 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
 
 
     logger.info("Building Support Set Features...")
+    # Temporary storage for ALL candidates
+    candidate_features_per_class = {i: [] for i in range(Config.NUM_CLASSES)}
+    
+    # Determine max candidates to fetch (e.g. 5x desired size) to have good cluster pool
+    # Or just fetch all training data? That might be too slow.
+    # Let's fetch up to 5 * samples_per_class
+    fetch_limit = samples_per_class * 5
+    
+    with torch.no_grad():
+        for images, labels in tqdm(support_loader, desc="Extracting Candidates", leave=False):
+            images = images.to(device)
+            # x: (B, C, H, W)
+            x, _, _, _ = model(images) 
+            x_norm = apply_bn_spatial(x, model.bn)
+            
+            finished_classes = 0
+            for i in range(images.size(0)):
+                lbl = labels[i].item()
+                if len(candidate_features_per_class[lbl]) < fetch_limit:
+                    feat = x_norm[i].cpu() # (C, H, W)
+                    candidate_features_per_class[lbl].append(feat)
+            
+            # Check if we have enough for all classes
+            if all(len(v) >= fetch_limit for v in candidate_features_per_class.values()):
+                break
+
+    # K-Means Construction
     support_features = []
     support_labels = []
     
-    samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
-    class_counts = {i: 0 for i in range(Config.NUM_CLASSES)}
+    logger.info(f"Selecting {samples_per_class} prototypes per class using K-Means...")
     
-    # Store features by class for prototype calculation
-    class_features = {i: [] for i in range(Config.NUM_CLASSES)}
-    
-    with torch.no_grad():
-        for images, labels in tqdm(support_loader, desc="Extracting Support", leave=False):
-            images = images.to(device)
-            # Model returns: spatial_feats, flat, logits, projected
-            # x: (B, C, H, W)
-            x, _, _, _ = model(images) 
-            
-            # Normalize Spatial Features directly using BN params
-            # This aligns them with the space used for Center Loss / Mahalanobis
-            x_norm = apply_bn_spatial(x, model.bn)
-            
-            for i in range(images.size(0)):
-                lbl = labels[i].item()
-                if class_counts[lbl] < samples_per_class:
-                    feat = x_norm[i].cpu() # (C, H, W)
-                    support_features.append(feat)
-                    support_labels.append(lbl)
-                    class_counts[lbl] += 1
-            
-            if all(c >= samples_per_class for c in class_counts.values()):
-                break
-                
-    support_features = torch.stack(support_features).to(device) # (N, C, H, W)
+    for i in range(Config.NUM_CLASSES):
+        candidates = torch.stack(candidate_features_per_class[i]) # (M, C, H, W)
+        
+        # Use GAP for Clustering
+        candidates_gap = candidates.mean(dim=(2, 3)) # (M, C)
+        
+        # Run K-Means
+        # Returns centroids, but we need the actual features (or just use centroids?)
+        # For methods like React/Mahalanobis, centroids are fine.
+        # But for OT, we need spatial structure (H, W).
+        # We can Construct Spatial Centroids?
+        # A simple way: Run K-Means on flattened (C*H*W)? No, high dim.
+        # Better: run K-Means on GAP, find nearest real sample to centroid. (Algorithm: Herding / K-Center)
+        
+        # Let's use K-Means centroids logic on GAP, then find nearest candidate.
+        centroids_gap = kmeans_select(candidates_gap, samples_per_class, device=device) # (K, C)
+        
+        # Find nearest candidates to these centroids
+        # dist: (K, M)
+        dists = torch.cdist(centroids_gap, candidates_gap)
+        _, nearest_indices = torch.min(dists, dim=1)
+        
+        # Select spatial features
+        selected_spatial = candidates[nearest_indices] # (K, C, H, W)
+        
+        support_features.append(selected_spatial)
+        support_labels.extend([i] * samples_per_class)
+        
+    support_features = torch.cat(support_features, dim=0).to(device)
     support_labels = torch.tensor(support_labels).to(device)
     
     # --- React Implementation (Clip High Activations) ---
@@ -367,6 +431,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 confidence, _ = torch.max(probs_fuse, 1)
                 
                 min_ot_dist = ot_dists[:, 0]
+                
+                # INTEGRATE CONFLICT INTO UNCERTAINTY (OOD Score)
+                # U_final = U_dempster + lambda * Conflict
+                # High conflict -> High OOD probability
+                u_fuse = u_fuse + C_fuse * 1.0 # Lambda=1.0 for now
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -523,6 +592,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         
                         entropy_param = fusion_module.compute_entropy(alpha_param)
                         alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=entropy_param)
+                        
+                        # Integrate Conflict
+                        u_fuse = u_fuse + C_fuse * 1.0
+                        
                         min_ot_dist = ot_dists[:, 0]
                     
                     # Branch Uncertainties

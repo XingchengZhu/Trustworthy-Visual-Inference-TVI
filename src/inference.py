@@ -26,6 +26,24 @@ def load_backbone(device, logger):
     model.eval()
     return model
 
+def apply_bn_spatial(x, bn_layer):
+    """
+    Apply parameters of a BatchNorm1d layer to a spatial feature map (B, C, H, W).
+    This ensures spatial features are in the same distribution space as the flattened (BN'd) features.
+    """
+    # x: (B, C, H, W)
+    # bn_layer: nn.BatchNorm1d
+    
+    mean = bn_layer.running_mean.view(1, -1, 1, 1).to(x.device)
+    var = bn_layer.running_var.view(1, -1, 1, 1).to(x.device)
+    weight = bn_layer.weight.view(1, -1, 1, 1).to(x.device)
+    bias = bn_layer.bias.view(1, -1, 1, 1).to(x.device)
+    eps = bn_layer.eps
+    
+    # Standard BN: y = (x - mean) / sqrt(var + eps) * weight + bias
+    out = (x - mean) / torch.sqrt(var + eps) * weight + bias
+    return out
+
 def build_support_set(model, support_loader, device, logger, rebuild_support=False):
     support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
     
@@ -55,48 +73,51 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
         for images, labels in tqdm(support_loader, desc="Extracting Support", leave=False):
             images = images.to(device)
             # Model returns: spatial_feats, flat, logits, projected
-            _, features, _, _ = model(images) 
-            # Use Flat BN Features (aligned with Center Loss)
-            # Reshape to (B, C, 1, 1) for OTMetric compatibility
-            features = features.unsqueeze(-1).unsqueeze(-1) 
+            # x: (B, C, H, W)
+            x, _, _, _ = model(images) 
+            
+            # Normalize Spatial Features directly using BN params
+            # This aligns them with the space used for Center Loss / Mahalanobis
+            x_norm = apply_bn_spatial(x, model.bn)
             
             for i in range(images.size(0)):
                 lbl = labels[i].item()
                 if class_counts[lbl] < samples_per_class:
-                    feat = features[i].cpu()
+                    feat = x_norm[i].cpu() # (C, H, W)
                     support_features.append(feat)
                     support_labels.append(lbl)
-                    class_features[lbl].append(feat)
                     class_counts[lbl] += 1
             
             if all(c >= samples_per_class for c in class_counts.values()):
                 break
                 
-    support_features = torch.stack(support_features).to(device)
+    support_features = torch.stack(support_features).to(device) # (N, C, H, W)
     support_labels = torch.tensor(support_labels).to(device)
     
     # --- React Implementation (Clip High Activations) ---
     logger.info(f"Applying React (Rectified Activation) w/ p={Config.REACT_PERCENTILE}")
-    # Flatten strictly for stats
-    flat_support = support_features.view(support_features.size(0), -1)
+    # Flatten strictly for stats: (N, C*H*W) or (N*H*W, C)?
+    # We clip activations element-wise regardless of spatial position.
+    flat_support_all = support_features.view(-1)
     # Find global percentile threshold
-    # Note: quantile requires float
-    clip_threshold = torch.quantile(flat_support, Config.REACT_PERCENTILE / 100.0)
+    clip_threshold = torch.quantile(flat_support_all, Config.REACT_PERCENTILE / 100.0)
     logger.info(f"React Threshold: {clip_threshold:.4f}")
     
     # Clip Support Features
     support_features = torch.clamp(support_features, max=clip_threshold)
     
     # --- Robust Mahalanobis (Tied statistics) ---
-    # We use FLATTENED, RECTIFIED features for covariance
-    # Re-compute prototypes based on clipped features
+    # We use FLATTENED (GAP) features for Covariance Calculation to match Global semantics
+    # Global Average Pooling manually:
+    support_flat_gap = torch.mean(support_features, dim=(2, 3)) # (N, C)
+    
     prototypes = []
     centered_features = []
     
     for i in range(Config.NUM_CLASSES):
         mask = (support_labels == i)
-        # (N_c, C, 1, 1) -> (N_c, C)
-        class_feats = support_features[mask].view(mask.sum(), -1)
+        # GAP features for class i
+        class_feats = support_flat_gap[mask]
         
         # Mean
         mu = class_feats.mean(dim=0)
@@ -112,8 +133,7 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     N_samples = centered_features.size(0)
     cov = torch.matmul(centered_features.T, centered_features) / (N_samples - 1)
     
-    # Robust Shrinkage (Ledoit-Wolf-like diagonal loading)
-    # This prevents singular matrix and stabilizes inverse
+    # Robust Shrinkage
     alpha = 1e-4
     cov = (1 - alpha) * cov + alpha * torch.eye(cov.size(0)).to(device)
     
@@ -124,7 +144,7 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
         logger.warning("Covariance matrix is singular! Using pseudo-inverse.")
         precision_matrix = torch.pinverse(cov)
         
-    logger.info("Computed Robust Precision Matrix.")
+    logger.info("Computed Robust Precision Matrix (on GAP features).")
     
     # Re-shape Prototypes for VOS (K, C, 1, 1)
     prototypes = prototypes.view(Config.NUM_CLASSES, -1, 1, 1)
@@ -289,9 +309,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             # 1. Backbone
             # Return: spatial, flat, logits, projected
-            _, flat_feats, logits, _ = model(images)
-            # Use Flat BN Features for OT
-            features = flat_feats.unsqueeze(-1).unsqueeze(-1)
+            # x: (B, C, H, W)
+            x, _, logits, _ = model(images)
+            
+            # Use Spatial BN Features for OT (Structure Aware)
+            features = apply_bn_spatial(x, model.bn)
             
             # React Clipping
             if clip_threshold > 0:
@@ -472,8 +494,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         try:
             with torch.no_grad():
                 for images, labels in current_ood_loop_func():
-                    _, flat_feats, logits, _ = model(images)
-                    features = flat_feats.unsqueeze(-1).unsqueeze(-1)
+                    x, _, logits, _ = model(images)
+                    features = apply_bn_spatial(x, model.bn)
                     
                     # React Clipping
                     if clip_threshold > 0:

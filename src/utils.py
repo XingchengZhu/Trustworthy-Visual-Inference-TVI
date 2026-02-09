@@ -78,41 +78,31 @@ def compute_auroc(id_uncertainties, ood_uncertainties):
     
     return roc_auc_score(y_true, y_scores)
 
-def compute_fpr95(id_uncertainties, ood_uncertainties):
+def compute_fpr95(id_scores, ood_scores):
     """
-    Compute FPR at 95% TPR.
-    TPR = TP / (TP + FN) = 0.95
-    FPR = FP / (FP + TN)
+    Compute FPR at 95% TPR (Standard Academic Definition).
     
-    Here 'Positive' (Class 1) is OOD. 'Negative' (Class 0) is ID.
-    We want to detect OOD (High Uncertainty).
+    Definition: The probability that a negative example (OOD) is misclassified as positive (ID)
+    when the True Positive Rate (ID) is 95%.
     
-    Threshold such that 95% of OOD samples are detected.
-    Check how many ID samples are incorrectly detected as OOD (False Positives).
+    Args:
+        id_scores: Uncertainty scores for In-Distribution data (Higher = More Uncertain/OOD).
+        ood_scores: Uncertainty scores for Out-of-Distribution data.
     """
-    # Ensure numpy
-    id_uncertainties = np.array(id_uncertainties)
-    ood_uncertainties = np.array(ood_uncertainties)
+    id_scores = np.array(id_scores)
+    ood_scores = np.array(ood_scores)
     
-    # Concatenate
-    scores = np.concatenate([id_uncertainties, ood_uncertainties])
-    labels = np.concatenate([np.zeros(len(id_uncertainties)), np.ones(len(ood_uncertainties))])
+    # 1. Determine Threshold to ensure 95% ID TPR
+    # We classify sample as ID if score <= threshold.
+    # To keep 95% of ID samples, threshold must be the 95th percentile of ID scores.
+    # (i.e., 95% of ID scores are below this value).
+    threshold = np.percentile(id_scores, 95)
     
-    # Sort scores
-    # We assume higher score = OOD
-    # Find threshold where TPR >= 0.95
+    # 2. Compute FPR (OOD samples misclassified as ID)
+    # Misclassified if ood_score <= threshold
+    num_ood = len(ood_scores)
+    num_fp = np.sum(ood_scores <= threshold)
     
-    # Use sklearn simply? 
-    # Or manual:
-    # Sort OOD scores descending
-    ood_sorted = np.sort(ood_uncertainties)
-    # Threshold is the value at 5% percentile (since we want Top 95% to be above threshold)
-    # percentile 5 means 5% are below, 95% are above.
-    threshold = np.percentile(ood_sorted, 5)
+    fpr = num_fp / (num_ood + 1e-10)
     
-    # FP: ID samples > threshold
-    fp = np.sum(id_uncertainties > threshold)
-    tn = np.sum(id_uncertainties <= threshold)
-    
-    fpr = fp / (fp + tn + 1e-8)
     return fpr

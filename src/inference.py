@@ -556,7 +556,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         if ood_name == 'noise':
             # Generator wrapper
             def noise_gen():
-                num_ood = 500
+                num_ood = 3000 # Increased for academic robustness
                 with torch.no_grad():
                     noise_images = torch.randn(num_ood, 3, 32, 32).to(device)
                     # Fake labels -1 for OOD
@@ -566,7 +566,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         else:
             def loader_gen():
                 loader = get_ood_loader(ood_name)
-                max_samples = 500
+                max_samples = 3000 # Increased for academic robustness
                 cnt = 0
                 for img, lbl in loader:
                     if cnt >= max_samples: break

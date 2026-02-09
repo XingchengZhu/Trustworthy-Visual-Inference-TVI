@@ -11,7 +11,7 @@
     "sinkhorn_max_iter": 100,
     "k_neighbors": 50,
     "evidence_scale": 100.0,
-    "rbf_gamma": 3.0,
+    "rbf_gamma": 5.0,
     "vos_type": "boundary",
     "vo_beta": 0.5
 }

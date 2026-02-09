@@ -97,65 +97,53 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     logger.info("Building Support Set Features...")
     
     samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
-    
     # Temporary storage for ALL candidates
     candidate_features_per_class = {i: [] for i in range(Config.NUM_CLASSES)}
     
     # Determine max candidates to fetch (e.g. 5x desired size) to have good cluster pool
     # Or just fetch all training data? That might be too slow.
-    # Let's fetch up to 5 * samples_per_class
-    fetch_limit = samples_per_class * 5
+    logger.info("Building Support Set Features (Using Projected Features for Method 16)...")
+    model.eval()
+    
+    candidate_features_per_class = [[] for _ in range(Config.NUM_CLASSES)]
     
     with torch.no_grad():
-        for images, labels in tqdm(support_loader, desc="Extracting Candidates", leave=False):
-            images = images.to(device)
-            # x: (B, C, H, W)
-            x, _, _, _ = model(images) 
-            x_norm = apply_bn_spatial(x, model.bn)
+        for images, labels in tqdm(support_loader, desc="Extracting Candidates"):
+            images, labels = images.to(device), labels.to(device)
+            # Method 16: Extract Projected Features (128d)
+            # x, features, logits, projected = model(images)
+            _, _, _, projected = model(images)
             
-            finished_classes = 0
+            # Normalize Projected features (SupCon requirement)
+            projected = torch.nn.functional.normalize(projected, dim=1)
+            
             for i in range(images.size(0)):
-                lbl = labels[i].item()
-                if len(candidate_features_per_class[lbl]) < fetch_limit:
-                    feat = x_norm[i].cpu() # (C, H, W)
-                    candidate_features_per_class[lbl].append(feat)
-            
-            # Check if we have enough for all classes
-            if all(len(v) >= fetch_limit for v in candidate_features_per_class.values()):
-                break
-
-    # K-Means Construction
+                label = labels[i].item()
+                # Store (128,)
+                candidate_features_per_class[label].append(projected[i])
+                
     support_features = []
     support_labels = []
+    samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
     
-    logger.info(f"Selecting {samples_per_class} prototypes per class using K-Means...")
+    logger.info(f"Selecting {samples_per_class} prototypes per class using K-Means (Projected Space)...")
     
     for i in range(Config.NUM_CLASSES):
-        candidates = torch.stack(candidate_features_per_class[i]) # (M, C, H, W)
+        candidates = torch.stack(candidate_features_per_class[i]) # (M, 128)
         
-        # Use GAP for Clustering
-        candidates_gap = candidates.mean(dim=(2, 3)) # (M, C)
+        # Method 16: K-Means on Projected Features
+        centroids = kmeans_select(candidates, samples_per_class, device=device) # (K, 128)
         
-        # Run K-Means
-        # Returns centroids, but we need the actual features (or just use centroids?)
-        # For methods like React/Mahalanobis, centroids are fine.
-        # But for OT, we need spatial structure (H, W).
-        # We can Construct Spatial Centroids?
-        # A simple way: Run K-Means on flattened (C*H*W)? No, high dim.
-        # Better: run K-Means on GAP, find nearest real sample to centroid. (Algorithm: Herding / K-Center)
-        
-        # Let's use K-Means centroids logic on GAP, then find nearest candidate.
-        centroids_gap = kmeans_select(candidates_gap, samples_per_class, device=device) # (K, C)
-        
-        # Find nearest candidates to these centroids
-        # dist: (K, M)
-        dists = torch.cdist(centroids_gap, candidates_gap)
+        # Find nearest real candidates to centroids
+        dists = torch.cdist(centroids, candidates)
         _, nearest_indices = torch.min(dists, dim=1)
         
-        # Select spatial features
-        selected_spatial = candidates[nearest_indices] # (K, C, H, W)
+        selected = candidates[nearest_indices] # (K, 128)
         
-        support_features.append(selected_spatial)
+        # Reshape to (K, 128, 1, 1) for compatibility with spatial OT module
+        selected = selected.unsqueeze(2).unsqueeze(3)
+        
+        support_features.append(selected)
         support_labels.extend([i] * samples_per_class)
         
     support_features = torch.cat(support_features, dim=0).to(device)
@@ -384,15 +372,19 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             # 1. Backbone
             # Return: spatial, flat, logits, projected
-            # x: (B, C, H, W)
-            x, _, logits, _ = model(images)
+            # Method 16: Use Projected Features (128d)
+            _, _, logits, projected = model(images)
             
-            # Use Spatial BN Features for OT (Structure Aware)
-            features = apply_bn_spatial(x, model.bn)
+            # Normalize (SupCon Space)
+            projected = torch.nn.functional.normalize(projected, dim=1)
             
-            # React Clipping
-            if clip_threshold > 0:
-                features = torch.clamp(features, max=clip_threshold)
+            # Reshape for OT Module (B, 128, 1, 1). 
+            # This turns Sinkhorn into simple Element-wise Distance between vectors (since 1x1 grid).
+            features = projected.unsqueeze(2).unsqueeze(3)
+            
+            # Note: We skip React Clipping for Projected Features as they are already normalized/squashed?
+            # SupCon features are unit vectors. React makes no sense here.
+            # However, if clip_threshold > 0, we might clamp? No, let's skip for SupCon.
             
             # 2. Parametric
             evidence_param = evidence_extractor.get_parametric_evidence(logits)

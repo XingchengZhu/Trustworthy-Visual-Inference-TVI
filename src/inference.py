@@ -713,10 +713,6 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             last_ood_uncertainties = ood_u_fuse
 
-        except Exception as e:
-            logger.error(f"Failed OOD {ood_name}: {e}")
-            import traceback
-            traceback.print_exc()
 
     # Save Results
     results = {

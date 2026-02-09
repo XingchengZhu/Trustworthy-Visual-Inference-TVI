@@ -97,53 +97,65 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     logger.info("Building Support Set Features...")
     
     samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
+    
     # Temporary storage for ALL candidates
     candidate_features_per_class = {i: [] for i in range(Config.NUM_CLASSES)}
     
     # Determine max candidates to fetch (e.g. 5x desired size) to have good cluster pool
     # Or just fetch all training data? That might be too slow.
-    logger.info("Building Support Set Features (Using Projected Features for Method 16)...")
-    model.eval()
-    
-    candidate_features_per_class = [[] for _ in range(Config.NUM_CLASSES)]
+    # Let's fetch up to 5 * samples_per_class
+    fetch_limit = samples_per_class * 5
     
     with torch.no_grad():
-        for images, labels in tqdm(support_loader, desc="Extracting Candidates"):
-            images, labels = images.to(device), labels.to(device)
-            # Method 16: Extract Projected Features (128d)
-            # x, features, logits, projected = model(images)
-            _, _, _, projected = model(images)
+        for images, labels in tqdm(support_loader, desc="Extracting Candidates", leave=False):
+            images = images.to(device)
+            # x: (B, C, H, W)
+            x, _, _, _ = model(images) 
+            x_norm = apply_bn_spatial(x, model.bn)
             
-            # Normalize Projected features (SupCon requirement)
-            projected = torch.nn.functional.normalize(projected, dim=1)
-            
+            finished_classes = 0
             for i in range(images.size(0)):
-                label = labels[i].item()
-                # Store (128,)
-                candidate_features_per_class[label].append(projected[i])
-                
+                lbl = labels[i].item()
+                if len(candidate_features_per_class[lbl]) < fetch_limit:
+                    feat = x_norm[i].cpu() # (C, H, W)
+                    candidate_features_per_class[lbl].append(feat)
+            
+            # Check if we have enough for all classes
+            if all(len(v) >= fetch_limit for v in candidate_features_per_class.values()):
+                break
+
+    # K-Means Construction
     support_features = []
     support_labels = []
-    samples_per_class = Config.NUM_SUPPORT_SAMPLES // Config.NUM_CLASSES
     
-    logger.info(f"Selecting {samples_per_class} prototypes per class using K-Means (Projected Space)...")
+    logger.info(f"Selecting {samples_per_class} prototypes per class using K-Means...")
     
     for i in range(Config.NUM_CLASSES):
-        candidates = torch.stack(candidate_features_per_class[i]) # (M, 128)
+        candidates = torch.stack(candidate_features_per_class[i]) # (M, C, H, W)
         
-        # Method 16: K-Means on Projected Features
-        centroids = kmeans_select(candidates, samples_per_class, device=device) # (K, 128)
+        # Use GAP for Clustering
+        candidates_gap = candidates.mean(dim=(2, 3)) # (M, C)
         
-        # Find nearest real candidates to centroids
-        dists = torch.cdist(centroids, candidates)
+        # Run K-Means
+        # Returns centroids, but we need the actual features (or just use centroids?)
+        # For methods like React/Mahalanobis, centroids are fine.
+        # But for OT, we need spatial structure (H, W).
+        # We can Construct Spatial Centroids?
+        # A simple way: Run K-Means on flattened (C*H*W)? No, high dim.
+        # Better: run K-Means on GAP, find nearest real sample to centroid. (Algorithm: Herding / K-Center)
+        
+        # Let's use K-Means centroids logic on GAP, then find nearest candidate.
+        centroids_gap = kmeans_select(candidates_gap, samples_per_class, device=device) # (K, C)
+        
+        # Find nearest candidates to these centroids
+        # dist: (K, M)
+        dists = torch.cdist(centroids_gap, candidates_gap)
         _, nearest_indices = torch.min(dists, dim=1)
         
-        selected = candidates[nearest_indices] # (K, 128)
+        # Select spatial features
+        selected_spatial = candidates[nearest_indices] # (K, C, H, W)
         
-        # Reshape to (K, 128, 1, 1) for compatibility with spatial OT module
-        selected = selected.unsqueeze(2).unsqueeze(3)
-        
-        support_features.append(selected)
+        support_features.append(selected_spatial)
         support_labels.extend([i] * samples_per_class)
         
     support_features = torch.cat(support_features, dim=0).to(device)
@@ -272,12 +284,8 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
         # Use GAP for Gamma Calc (matches Precision Matrix)
         # support_features: (N, C, H, W) -> (N, C)
         samples = support_features[mask][:10].mean(dim=(2, 3)) 
-        
-        # Get dynamic channel dim (e.g. 512 or 128)
-        C = samples.size(1)
-        
         # prototypes: (K, C, H, W) -> (C) -> (1, C)
-        proto = prototypes[i].mean(dim=(1, 2)).view(1, C)
+        proto = prototypes[i].mean(dim=(1, 2)).view(1, 512)
         
         # Mahalanobis Distance
         diff = samples - proto
@@ -376,19 +384,15 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             
             # 1. Backbone
             # Return: spatial, flat, logits, projected
-            # Method 16: Use Projected Features (128d)
-            _, _, logits, projected = model(images)
+            # x: (B, C, H, W)
+            x, _, logits, _ = model(images)
             
-            # Normalize (SupCon Space)
-            projected = torch.nn.functional.normalize(projected, dim=1)
+            # Use Spatial BN Features for OT (Structure Aware)
+            features = apply_bn_spatial(x, model.bn)
             
-            # Reshape for OT Module (B, 128, 1, 1). 
-            # This turns Sinkhorn into simple Element-wise Distance between vectors (since 1x1 grid).
-            features = projected.unsqueeze(2).unsqueeze(3)
-            
-            # Note: We skip React Clipping for Projected Features as they are already normalized/squashed?
-            # SupCon features are unit vectors. React makes no sense here.
-            # However, if clip_threshold > 0, we might clamp? No, let's skip for SupCon.
+            # React Clipping
+            if clip_threshold > 0:
+                features = torch.clamp(features, max=clip_threshold)
             
             # 2. Parametric
             evidence_param = evidence_extractor.get_parametric_evidence(logits)
@@ -571,19 +575,40 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     cnt += img.size(0)
             current_ood_loop_func = loader_gen
 
-        try:
-            with torch.no_grad():
-                for images, labels in current_ood_loop_func():
-                    # Method 16: Use Projected Features for OOD
-                    _, _, logits, projected = model(images)
+            # ODIN typically requires Grad. We disable global no_grad for the loop.
+            for images, labels in current_ood_loop_func():
+                # ODIN Logic
+                if getattr(Config, 'ODIN_EPS', 0.0) > 0:
+                    # Enable Grad for Input
+                    images.requires_grad = True
+                    _, _, logits_pre, _ = model(images)
+                    logits_pre = logits_pre / getattr(Config, 'ODIN_TEMP', 1.0)
                     
-                    # Normalize (SupCon Space)
-                    projected = torch.nn.functional.normalize(projected, dim=1)
+                    preds = logits_pre.argmax(dim=1)
+                    loss = nn.CrossEntropyLoss()(logits_pre, preds)
+                    loss.backward()
                     
-                    # Reshape for OT (1x1)
-                    features = projected.unsqueeze(2).unsqueeze(3)
+                    grad_sign = images.grad.data.sign()
+                    # OOD: Perturbation aims to increase confidence of "Top Class".
+                    # If OOD, this perturbation is less effective than for ID.
+                    images_perturbed = images - Config.ODIN_EPS * grad_sign
                     
-                    # Skip React Clipping (SupCon features are normalized)
+                    with torch.no_grad():
+                        x, _, logits, _ = model(images_perturbed)
+                else:
+                    with torch.no_grad():
+                        x, _, logits, _ = model(images)
+
+                # Temperature
+                if getattr(Config, 'ODIN_TEMP', 1.0) > 1.0:
+                    logits = logits / Config.ODIN_TEMP
+
+                with torch.no_grad():
+                    features = apply_bn_spatial(x, model.bn)
+                    
+                    # React Clipping
+                    if clip_threshold > 0:
+                         features = torch.clamp(features, max=clip_threshold)
                     
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
                     alpha_param = evidence_param + 1

@@ -44,11 +44,11 @@ class OTMetric:
              s_flat = torch.matmul(s_flat, L)
              
              # Calculate Sim/Dist on WHITENED features
-             # CRITICAL FIX: L2 Normalize Whitened Features to prevent Sinkhorn Underflow!
-             # Mahalanobis distance can be large (e.g. >100), causing exp(-M/eps) -> 0.
-             # Normalizing converts this to "Whitened Cosine", which is bounded [0, 4].
-             q_norm = torch.nn.functional.normalize(q_flat, dim=2)
-             s_norm = torch.nn.functional.normalize(s_flat, dim=2)
+             # Revert L2 Norm: Use raw whitened features to preserve Magnitude for OOD detection (Method 12)
+             # Mahalanobis distance relies on magnitude. Normalized features destroy this signal.
+             # We fix underflow by increasing SINKHORN_EPS instead.
+             q_norm = q_flat
+             s_norm = s_flat
              
              # Flag to indicate we act in whitened space
              whitened = True

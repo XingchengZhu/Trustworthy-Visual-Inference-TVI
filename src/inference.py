@@ -452,6 +452,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
                 
                 u_fuse = torch.max(u_param, u_nonparam)
+                if total == 0: logger.info("DEBUG: Logic - u_fuse = max(u_param, u_nonparam) NO CONFLICT")
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)

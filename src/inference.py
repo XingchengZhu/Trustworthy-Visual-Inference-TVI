@@ -445,8 +445,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 
                 # INTEGRATE CONFLICT INTO UNCERTAINTY (OOD Score)
                 # Method 10: Conservative Fusion (Max Rule)
-                # DS Fusion is optimistic (u1*u2). We want pessimistic (max(u1, u2)) for Safety/OOD.
-                # If either model is uncertain, we should be uncertain.
+                # Ensure shapes match to avoid broadcasting (e.g. (B,1) + (B,) -> (B,B))
+                if len(u_param.shape) > 1: u_param = u_param.squeeze()
+                if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
+                if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
+                
                 u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 1.0
             
             # Calculate uncertainties for branches (Entroy or similar)
@@ -611,6 +614,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         u_nonparam = Config.NUM_CLASSES / S_nonparam
 
                         # Integrate Conflict (Conservative)
+                        if len(u_param.shape) > 1: u_param = u_param.squeeze()
+                        if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
+                        if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
+                        
                         u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 1.0
                         
                         min_ot_dist = ot_dists[:, 0]

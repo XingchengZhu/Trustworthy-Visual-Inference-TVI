@@ -588,6 +588,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
                     alpha_param = evidence_param + 1
                     
+                    # Fix: Calculate u_param for current batch!
+                    S_param_init = torch.sum(alpha_param, dim=1)
+                    u_param = Config.NUM_CLASSES / S_param_init
+                    
                     # Defaults
                     alpha_nonparam = torch.ones_like(alpha_param)
                     alpha_fuse = alpha_param

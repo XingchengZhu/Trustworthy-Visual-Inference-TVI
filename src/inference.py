@@ -444,13 +444,13 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 min_ot_dist = ot_dists[:, 0]
                 
                 # INTEGRATE CONFLICT INTO UNCERTAINTY (OOD Score)
-                # Method 10: Conservative Fusion (Max Rule)
-                # Ensure shapes match to avoid broadcasting (e.g. (B,1) + (B,) -> (B,B))
+                # Method 13: Boost Conflict Weight to 5.0
+                # High conflict -> High OOD probability
                 if len(u_param.shape) > 1: u_param = u_param.squeeze()
                 if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
                 if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
                 
-                u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 1.0
+                u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 5.0
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -622,7 +622,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
                         if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
                         
-                        u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 1.0
+                        u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 5.0
                         
                         min_ot_dist = ot_dists[:, 0]
                     

@@ -574,12 +574,16 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         try:
             with torch.no_grad():
                 for images, labels in current_ood_loop_func():
-                    x, _, logits, _ = model(images)
-                    features = apply_bn_spatial(x, model.bn)
+                    # Method 16: Use Projected Features for OOD
+                    _, _, logits, projected = model(images)
                     
-                    # React Clipping
-                    if clip_threshold > 0:
-                         features = torch.clamp(features, max=clip_threshold)
+                    # Normalize (SupCon Space)
+                    projected = torch.nn.functional.normalize(projected, dim=1)
+                    
+                    # Reshape for OT (1x1)
+                    features = projected.unsqueeze(2).unsqueeze(3)
+                    
+                    # Skip React Clipping (SupCon features are normalized)
                     
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
                     alpha_param = evidence_param + 1

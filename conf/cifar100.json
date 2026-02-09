@@ -10,8 +10,8 @@
     "sinkhorn_eps": 0.05,
     "sinkhorn_max_iter": 100,
     "k_neighbors": 50,
-    "evidence_scale": 500.0,
+    "evidence_scale": 100.0,
     "rbf_gamma": 3.0,
     "vos_type": "boundary",
-    "vo_beta": 0.4
+    "vo_beta": 0.5
 }

@@ -451,7 +451,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
                 if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
                 
-                u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 5.0
+                u_fuse = torch.max(u_param, u_nonparam)
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -648,7 +648,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
                         if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
                         
-                        u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 5.0
+                        # Remove Conflict term as it introduces noise (OT branch is collapsed)
+                        u_fuse = torch.max(u_param, u_nonparam)
                         
                         min_ot_dist = ot_dists[:, 0]
                     
@@ -687,6 +688,13 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                             "confidence": conf[i].item(),
                             "min_ot_dist": min_ot_dist[i].item()
                         })
+
+
+            # Debug Stats
+            logger.info(f"DEBUG Stats for {ood_name}:")
+            logger.info(f"  ID Fuse Mean: {np.mean(id_uncertainties_fuse):.4f} | OOD Fuse Mean: {np.mean(ood_u_fuse):.4f}")
+            logger.info(f"  ID Param Mean: {np.mean(id_uncertainties_param):.4f} | OOD Param Mean: {np.mean(ood_u_param):.4f}")
+            logger.info(f"  ID OT Mean: {np.mean(id_uncertainties_nonparam):.4f} | OOD OT Mean: {np.mean(ood_u_nonparam):.4f}")
 
             # Compute AUROC for all branches (Ablation)
             auroc_fuse = compute_auroc(np.array(id_uncertainties_fuse), np.array(ood_u_fuse))

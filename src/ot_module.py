@@ -44,10 +44,11 @@ class OTMetric:
              s_flat = torch.matmul(s_flat, L)
              
              # Calculate Sim/Dist on WHITENED features
-             # Method 14: Mahalanobis Distance (Magnitude) with Corrected Gamma (0.001)
-             # Reverting L2 Norm to use raw magnitude.
-             q_norm = q_flat
-             s_norm = s_flat
+             # Method 15: Revert to Cosine Distance (L2 Norm) for Stability/Accuracy.
+             # Mahalanobis failed (Acc 73%). Cosine gives 77%.
+             # We tune VOs and Scale to fix OOD.
+             q_norm = torch.nn.functional.normalize(q_flat, dim=2)
+             s_norm = torch.nn.functional.normalize(s_flat, dim=2)
              
              # Flag to indicate we act in whitened space
              whitened = True

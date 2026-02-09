@@ -28,7 +28,10 @@ class OTMetric:
         # Or easier: matmul features with P_sqrt.
         # But we passed P (precision).
         
-        if precision_matrix is not None and (Config.METRIC_TYPE == 'mahalanobis' or Config.METRIC_TYPE == 'sinkhorn'):
+        # Check if Class-Specific Whitening
+        is_class_specific = isinstance(precision_matrix, dict)
+
+        if not is_class_specific and precision_matrix is not None and (Config.METRIC_TYPE == 'mahalanobis' or Config.METRIC_TYPE == 'sinkhorn'):
              # GLOBAL WHITENING (Structure-Aware Robustness)
              # Decompose P = L @ L.T
              try:
@@ -45,15 +48,14 @@ class OTMetric:
              
              # Calculate Sim/Dist on WHITENED features
              # Method 15: Revert to Cosine Distance (L2 Norm) for Stability/Accuracy.
-             # Mahalanobis failed (Acc 73%). Cosine gives 77%.
-             # We tune VOs and Scale to fix OOD.
              q_norm = torch.nn.functional.normalize(q_flat, dim=2)
              s_norm = torch.nn.functional.normalize(s_flat, dim=2)
              
              # Flag to indicate we act in whitened space
              whitened = True
         else:
-            # Standard L2 Normalization (Cosine-like behavior)
+            # Standard L2 Normalization (Cosine-like behavior) for Coarse Filtering
+            # If Class-Specific, we use raw cosine for coarse filtering, then apply whitening later.
             q_norm = torch.nn.functional.normalize(q_flat, dim=2)
             s_norm = torch.nn.functional.normalize(s_flat, dim=2)
             whitened = False
@@ -109,25 +111,78 @@ class OTMetric:
         # For Euclidean/Mahalanobis: M = ||x - y||^2 or ||x-y||
         
         if Config.METRIC_TYPE == 'sinkhorn':
-             # Whitened Sinkhorn (if whitened=True) or Standard Sinkhorn
-             # Cost Matrix: Sq Euclidean Distance? Or Euclidean?
-             # Usually Sq Euclidean is standard for Wasserstein-2.
-             # q_in: (BS, N, C)
-             # dist_mat: (BS, N, N)
-             # efficiently: |x|^2 + |y|^2 - 2xy
-             x2 = torch.sum(q_in**2, dim=2, keepdim=True) # (BS, N, 1)
-             y2 = torch.sum(s_in**2, dim=2, keepdim=True) # (BS, N, 1) # y2 should be (BS, 1, N) for broadcast?
-             # wait: s_in is (BS, N, C). we want pair-wise (N x N)
-             # s_in transpose: (BS, C, N)
-             xy = torch.bmm(q_in, s_in.transpose(1, 2)) # (BS, N, N)
-             
-             # M = x^2 + y^2 - 2xy
-             M = x2 + y2.transpose(1, 2) - 2 * xy
-             M = torch.clamp(M, min=0.0)
-             
-             # Run Sinkhorn
-             dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
-             distances = dist_flat.view(B, k)
+             if is_class_specific:
+                 # CLASS-CONDITIONAL WHITENING (SOTA)
+                 # Neighbor Labels
+                 neighbor_labels = support_labels[topk_indices] # (B, K)
+                 neighbor_labels_flat = neighbor_labels.view(-1) # (B*K)
+                 
+                 # Prepare output distances
+                 dist_flat = torch.zeros(B*k, device=self.device)
+                 
+                 # Re-gather RAW features (Before Global Norm)
+                 # q_flat: (B, N, C). Expand -> (B*K, N, C)
+                 q_raw_batch = q_flat.unsqueeze(1).expand(-1, k, -1, -1).reshape(B*k, N, C)
+                 
+                 # s_flat: (S, N, C). Gather -> (B*K, N, C)
+                 topk_flat = topk_indices.view(-1)
+                 s_raw_batch = s_flat[topk_flat] 
+                 
+                 unique_batch_classes = torch.unique(neighbor_labels_flat)
+                 
+                 for c in unique_batch_classes:
+                     c_item = c.item()
+                     if c_item not in precision_matrix: continue
+                     
+                     mask = (neighbor_labels_flat == c) # Bool (B*K)
+                     if not mask.any(): continue
+                     
+                     # Get Precision/L for class c
+                     P = precision_matrix[c_item]
+                     try:
+                         L = torch.linalg.cholesky(P)
+                     except:
+                         u_svd, s_svd, v_svd = torch.svd(P)
+                         L = torch.matmul(u_svd, torch.diag(torch.sqrt(s_svd)))
+                     
+                     # Extract subset
+                     q_sub = q_raw_batch[mask] # (M, N, C)
+                     s_sub = s_raw_batch[mask] # (M, N, C)
+                     
+                     # Whiten: x' = x @ L
+                     q_sub_w = torch.matmul(q_sub, L)
+                     s_sub_w = torch.matmul(s_sub, L)
+                     
+                     # Normalize (for stability/cosine-like behavior in whitened space)
+                     q_sub_w = torch.nn.functional.normalize(q_sub_w, dim=2)
+                     s_sub_w = torch.nn.functional.normalize(s_sub_w, dim=2)
+                     
+                     # Compute Cost Matrix (Sq Euclidean)
+                     x2 = torch.sum(q_sub_w**2, dim=2, keepdim=True)
+                     y2 = torch.sum(s_sub_w**2, dim=2, keepdim=True)
+                     xy = torch.bmm(q_sub_w, s_sub_w.transpose(1, 2))
+                     M_sub = x2 + y2.transpose(1, 2) - 2 * xy
+                     M_sub = torch.clamp(M_sub, min=0.0)
+                     
+                     # Sinkhorn
+                     d_sub = self.batch_sinkhorn_torch(M_sub, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
+                     
+                     # Scatter back
+                     dist_flat[mask] = d_sub
+                     
+                 distances = dist_flat.view(B, k)
+
+             else:
+                 # Standard Sinkhorn (Global or No Whitening)
+                 x2 = torch.sum(q_in**2, dim=2, keepdim=True) # (BS, N, 1)
+                 y2 = torch.sum(s_in**2, dim=2, keepdim=True)
+                 xy = torch.bmm(q_in, s_in.transpose(1, 2)) # (BS, N, N)
+                 
+                 M = x2 + y2.transpose(1, 2) - 2 * xy
+                 M = torch.clamp(M, min=0.0)
+                 
+                 dist_flat = self.batch_sinkhorn_torch(M, Config.SINKHORN_EPS, Config.SINKHORN_MAX_ITER)
+                 distances = dist_flat.view(B, k)
              
         elif Config.METRIC_TYPE == 'mahalanobis' or Config.METRIC_TYPE == 'euclidean':
              # Standard Euclidean (on whitened features if Mahalanobis)
@@ -321,3 +376,36 @@ class OTMetric:
         dist = torch.sum(P * M, dim=[1, 2])
         
         return dist
+
+    def compute_class_precision_matrices(self, support_features, support_labels):
+        """
+        Compute Ledoit-Wolf precision matrix for each class.
+        Returns: Dict {class_idx: precision_matrix (C, C)}
+        """
+        from sklearn.covariance import LedoitWolf
+        
+        unique_classes = torch.unique(support_labels)
+        matrices = {}
+        
+        # features: (S, C, H, W)
+        # For Mahalanobis on feature vectors (C-dim), we use GAP features to estimate class topology.
+        s_gap = torch.nn.functional.adaptive_avg_pool2d(support_features, (1, 1)).view(support_features.size(0), -1)
+        
+        for c in unique_classes:
+            c = c.item()
+            mask = (support_labels == c)
+            feats_c = s_gap[mask].cpu().numpy()
+            
+            # Use Ledoit-Wolf for robust precision matrix estimation (handling small N)
+            # If N < C, empirical covariance is singular. LW handles this.
+            try:
+                lw = LedoitWolf()
+                lw.fit(feats_c)
+                prec = lw.precision_
+            except Exception as e:
+                # Fallback to Identity if fitting fails (e.g. 1 sample)
+                prec = np.eye(feats_c.shape[1])
+            
+            matrices[c] = torch.tensor(prec, dtype=torch.float32).to(self.device)
+            
+        return matrices

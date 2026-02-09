@@ -16,3 +16,4 @@ checkpoints/
 # Environment
 venv/
 env/
+.env

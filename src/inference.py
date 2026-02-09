@@ -200,22 +200,11 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     prototypes = torch.stack(prototypes) # (K, C)
     centered_features = torch.cat(centered_features, dim=0) # (N, C)
     
-    # Covariance: (X.T @ X) / (N - 1)
-    N_samples = centered_features.size(0)
-    cov = torch.matmul(centered_features.T, centered_features) / (N_samples - 1)
-    
-    # Robust Shrinkage
-    alpha = 1e-4
-    cov = (1 - alpha) * cov + alpha * torch.eye(cov.size(0)).to(device)
-    
-    # Precision Matrix
-    try:
-        precision_matrix = torch.inverse(cov)
-    except RuntimeError:
-        logger.warning("Covariance matrix is singular! Using pseudo-inverse.")
-        precision_matrix = torch.pinverse(cov)
-        
-    logger.info("Computed Robust Precision Matrix (on GAP features).")
+    # SOTA: Class-Conditional Precision Matrices (Item 3)
+    from src.ot_module import OTMetric
+    temp_ot = OTMetric(device=device)
+    precision_matrix = temp_ot.compute_class_precision_matrices(support_features, support_labels)
+    logger.info(f"Computed Class-Conditional Precision Matrices for {len(precision_matrix)} classes.")
     
     # Re-shape Prototypes for VOS (K, C, 1, 1)
     # Ensure they match spatial resolution of support set for OT
@@ -273,27 +262,23 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
     total_dist = 0.0
     count = 0
     
-    # Pre-compute Cholesky of Precision for Mahalanobis Distance check
-    L_inv = torch.linalg.cholesky(precision_matrix) # P = L @ L.T ... wait.
-    # We want dist = (x-u).T P (x-u) = || L.T(x-u) ||^2 where P = L @ L.T
-    # So we multiply by L.T. 
-    # Actually if P = U S U.T, transform is U sqrt(S).
+    # 4. Adaptive Gamma (using Class-Specific Mahalanobis logic)
+    # No global L_inv pre-computation since P varies.
     
     for i in range(Config.NUM_CLASSES):
         # Take first 10 samples (clipped)
         mask = (support_labels == i)
         # Use GAP for Gamma Calc (matches Precision Matrix)
-        # support_features: (N, C, H, W) -> (N, C)
         samples = support_features[mask][:10].mean(dim=(2, 3)) 
-        # prototypes: (K, C, H, W) -> (C) -> (1, C)
         proto = prototypes[i].mean(dim=(1, 2)).view(1, 512)
         
-        # Mahalanobis Distance
         diff = samples - proto
-        # diff: (N, 512)
+        
+        # Get Class Precision
+        P_c = precision_matrix[i]
+        
         # Dist = sum (diff @ P) * diff
-        # (N, D) @ (D, D) -> (N, D)
-        term1 = torch.matmul(diff, precision_matrix)
+        term1 = torch.matmul(diff, P_c)
         dists = torch.sum(term1 * diff, dim=1)
         
         total_dist += torch.sum(dists).item()
@@ -451,8 +436,14 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
                 if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
                 
-                u_fuse = torch.max(u_param, u_nonparam)
-                if total == 0: logger.info("DEBUG: Logic - u_fuse = max(u_param, u_nonparam) NO CONFLICT")
+
+                if len(u_fuse_ds.shape) > 1: u_fuse_ds = u_fuse_ds.squeeze()
+                # SOTA Formal Fusion: OOD Score = Total Uncertainty + Conflict
+                # Ablation: --no_conflict disables C_fuse
+                if args.no_conflict:
+                    u_fuse = u_fuse_ds
+                else:
+                    u_fuse = u_fuse_ds + C_fuse
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -536,6 +527,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         ood_datasets = ['svhn', 'cifar100']
     elif Config.DATASET_NAME == 'cifar100':
         ood_datasets = ['svhn', 'cifar10']
+    
+    # Extended OOD datasets (if requested)
+    if args.extended_ood:
+        ood_datasets.extend(['mnist', 'textures', 'tinyimagenet','places365'])  # Full academic benchmark suite
+        logger.info(f"Extended OOD mode: Testing {ood_datasets}")
     
     # Always keeping Noise for sanity check
     ood_datasets.append('noise')
@@ -648,9 +644,14 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         if len(u_param.shape) > 1: u_param = u_param.squeeze()
                         if len(u_nonparam.shape) > 1: u_nonparam = u_nonparam.squeeze()
                         if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
+                        if len(u_fuse_ds.shape) > 1: u_fuse_ds = u_fuse_ds.squeeze() # Squeeze DS uncertainty
                         
-                        # Remove Conflict term as it introduces noise (OT branch is collapsed)
-                        u_fuse = torch.max(u_param, u_nonparam)
+                        # SOTA Formal Fusion: OOD Score = Total Uncertainty + Conflict
+                        # Ablation: --no_conflict disables C_fuse
+                        if args.no_conflict:
+                            u_fuse = u_fuse_ds
+                        else:
+                            u_fuse = u_fuse_ds + C_fuse
                         
                         min_ot_dist = ot_dists[:, 0]
                     
@@ -801,6 +802,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         
     logger.info(f"Saved analysis report to {excel_path}")
     
+    # Send results via Telegram webhook (if configured)
+    try:
+        from autobot_webhook import send_inference_results
+        webhook_results = {
+            "parametric_accuracy": acc_param,
+            "fused_accuracy": acc_fuse,
+            "ece": ece_score,
+            "ood": ood_results
+        }
+        send_inference_results(webhook_results, dataset_name=Config.DATASET_NAME)
+    except ImportError:
+        logger.warning("Telegram webhook not available. Skipping notification.")
+    except Exception as e:
+        logger.warning(f"Webhook notification failed: {e}")
+    
     # Removed separate CSV export as per user request
     # df_detailed.to_csv(...) 
 
@@ -823,6 +839,10 @@ def main():
     parser.add_argument("--fusion_type", type=str, default=None, help="Override Fusion Type")
     parser.add_argument("--metric_type", type=str, default=None, help="Override Metric Type")
     parser.add_argument("--support_size", type=int, default=None, help="Override Support Set Size")
+    
+    # Ablation Flags
+    parser.add_argument("--no_conflict", action="store_true", help="Ablation: Disable Conflict term in Fusion (u_fuse = u_fuse_ds only)")
+    parser.add_argument("--extended_ood", action="store_true", help="Test extended OOD datasets (Textures, iNaturalist subset)")
     
     args = parser.parse_args()
     

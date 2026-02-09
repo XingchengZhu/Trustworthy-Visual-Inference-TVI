@@ -1,3 +1,4 @@
+import os
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
@@ -167,10 +168,46 @@ def get_ood_loader(ood_dataset_name):
         dataset = datasets.CIFAR100(root=Config.DATA_DIR, train=False, download=True, transform=transform)
     elif ood_dataset_name == 'cifar10':
         dataset = datasets.CIFAR10(root=Config.DATA_DIR, train=False, download=True, transform=transform)
+    elif ood_dataset_name == 'textures':
+        # DTD (Describable Textures Dataset) - Standard OOD Benchmark
+        dtd_path = os.path.join(Config.DATA_DIR, 'dtd', 'images')
+        if os.path.exists(dtd_path):
+            dataset = datasets.ImageFolder(dtd_path, transform=transform)
+        else:
+            raise FileNotFoundError(f"DTD (Textures) not found at {dtd_path}. Download from https://www.robots.ox.ac.uk/~vgg/data/dtd/")
+    elif ood_dataset_name == 'lsun_crop':
+        # LSUN Classroom (Cropped) - Standard OOD Benchmark
+        lsun_path = os.path.join(Config.DATA_DIR, 'LSUN_resize')
+        if os.path.exists(lsun_path):
+            dataset = datasets.ImageFolder(lsun_path, transform=transform)
+        else:
+            raise FileNotFoundError(f"LSUN-Resize not found at {lsun_path}. Download from standard OOD benchmarks.")
     elif ood_dataset_name == 'lsun':
          # LSUN is large, usually use LSUN-Resize or Classroom
-         # Keeping it simple for now, maybe just SVHN/CIFAR
-         raise NotImplementedError("LSUN ot supported yet")
+         raise NotImplementedError("LSUN not supported yet, use lsun_crop instead")
+    elif ood_dataset_name == 'mnist':
+        # MNIST - Grayscale, needs conversion to 3-channel
+        mnist_transform = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.Grayscale(num_output_channels=3),  # Convert grayscale to RGB
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+        dataset = datasets.MNIST(root=Config.DATA_DIR, train=False, download=True, transform=mnist_transform)
+    elif ood_dataset_name == 'places365':
+        # Places365 - Standard OOD Benchmark (use small version)
+        places_path = os.path.join(Config.DATA_DIR, 'places365')
+        if os.path.exists(places_path):
+            dataset = datasets.ImageFolder(places_path, transform=transform)
+        else:
+            raise FileNotFoundError(f"Places365 not found at {places_path}. Download from http://places2.csail.mit.edu/")
+    elif ood_dataset_name == 'tinyimagenet':
+        # TinyImageNet - 200 classes, 64x64 images
+        tiny_path = os.path.join(Config.DATA_DIR, 'tiny-imagenet-200', 'val')
+        if os.path.exists(tiny_path):
+            dataset = datasets.ImageFolder(tiny_path, transform=transform)
+        else:
+            raise FileNotFoundError(f"TinyImageNet not found at {tiny_path}. Download from http://cs231n.stanford.edu/tiny-imagenet-200.zip")
     else:
         raise ValueError(f"Unknown OOD dataset: {ood_dataset_name}")
         

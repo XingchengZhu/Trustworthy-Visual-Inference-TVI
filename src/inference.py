@@ -272,8 +272,12 @@ def build_support_set(model, support_loader, device, logger, rebuild_support=Fal
         # Use GAP for Gamma Calc (matches Precision Matrix)
         # support_features: (N, C, H, W) -> (N, C)
         samples = support_features[mask][:10].mean(dim=(2, 3)) 
+        
+        # Get dynamic channel dim (e.g. 512 or 128)
+        C = samples.size(1)
+        
         # prototypes: (K, C, H, W) -> (C) -> (1, C)
-        proto = prototypes[i].mean(dim=(1, 2)).view(1, 512)
+        proto = prototypes[i].mean(dim=(1, 2)).view(1, C)
         
         # Mahalanobis Distance
         diff = samples - proto

@@ -425,12 +425,12 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 )
                 alpha_nonparam = evidence_nonparam + 1
                 
-                # 4. Fusion with Entropy Discounting
-                # Compute Entropy of Parametric Branch
-                entropy_param = fusion_module.compute_entropy(alpha_param)
+                # 4. Fusion
+                # Disable Entropy Discounting to preserve "Unknown" signal from Parametric branch
+                # entropy_param = fusion_module.compute_entropy(alpha_param) 
                 
                 # Fusion
-                alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=entropy_param)
+                alpha_fuse, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
                 
                 # Update vars
                 S_nonparam = torch.sum(alpha_nonparam, dim=1)
@@ -444,10 +444,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 min_ot_dist = ot_dists[:, 0]
                 
                 # INTEGRATE CONFLICT INTO UNCERTAINTY (OOD Score)
-                # U_final = U_dempster + lambda * Conflict
-                # High conflict -> High OOD probability
-                # Increased weight to 2.0 for aggressive rejection of conflicting samples (Method 9)
-                u_fuse = u_fuse + C_fuse * 2.0
+                # Method 10: Conservative Fusion (Max Rule)
+                # DS Fusion is optimistic (u1*u2). We want pessimistic (max(u1, u2)) for Safety/OOD.
+                # If either model is uncertain, we should be uncertain.
+                u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 1.0
             
             # Calculate uncertainties for branches (Entroy or similar)
             # Parametric U: num_classes / sum(alpha)
@@ -602,11 +602,16 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         )
                         alpha_nonparam = evidence_nonparam + 1
                         
-                        entropy_param = fusion_module.compute_entropy(alpha_param)
-                        alpha_fuse, u_fuse, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=entropy_param)
+                        # Conservative Fusion (Method 10)
+                        # entropy_param = fusion_module.compute_entropy(alpha_param)
+                        alpha_fuse, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
                         
-                        # Integrate Conflict (Aggressive Weighting)
-                        u_fuse = u_fuse + C_fuse * 2.0
+                        # Recalculate u_nonparam locally if needed for max
+                        S_nonparam = torch.sum(alpha_nonparam, dim=1)
+                        u_nonparam = Config.NUM_CLASSES / S_nonparam
+
+                        # Integrate Conflict (Conservative)
+                        u_fuse = torch.max(u_param, u_nonparam) + C_fuse * 1.0
                         
                         min_ot_dist = ot_dists[:, 0]
                     

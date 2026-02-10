@@ -1,5 +1,6 @@
 {
     "dataset_name": "cifar100",
+    "backbone": "resnet18",
     "num_classes": 100,
     "batch_size": 128,
     "epochs": 100,

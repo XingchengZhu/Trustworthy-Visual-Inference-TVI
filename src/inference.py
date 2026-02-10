@@ -18,7 +18,8 @@ import argparse
 
 def load_backbone(device, logger):
     model = ResNetBackbone(num_classes=Config.NUM_CLASSES).to(device)
-    ckpt_name = f"best_resnet18_{Config.DATASET_NAME}.pth"
+
+    ckpt_name = f"best_{Config.BACKBONE.lower()}_{Config.DATASET_NAME}.pth"
     checkpoint_path = os.path.join(Config.Checkpoints_DIR, ckpt_name)
     if os.path.exists(checkpoint_path):
         logger.info(f"Loading checkpoint from {checkpoint_path}")
@@ -95,7 +96,7 @@ def kmeans_select(features, k, max_iter=20, device='cpu'):
     return centroids
 
 def build_support_set(model, support_loader, device, logger, rebuild_support=False):
-    support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
+    support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_{Config.BACKBONE.lower()}_support.pt")
     
     if os.path.exists(support_path) and not rebuild_support:
         logger.info(f"Loading cached support set from {support_path}")
@@ -385,6 +386,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     evidence_extractor = EvidenceExtractor(num_classes=Config.NUM_CLASSES)
     fusion_module = DempsterShaferFusion(num_classes=Config.NUM_CLASSES)
     
+    # --- POT Branch Initialization ---
+    pot_scorer = None
+    if getattr(args, 'pot', False):
+        from src.pot_module import POTScorer
+        # Build GAP prototypes from support set for POT
+        pot_prototypes_gap = []
+        for c in range(Config.NUM_CLASSES):
+            mask = (support_labels == c)
+            class_feats = support_features[mask]  # (Nc, C, H, W)
+            class_gap = class_feats.mean(dim=(2, 3))  # (Nc, D)
+            pot_prototypes_gap.append(class_gap.mean(dim=0))  # (D,)
+        pot_prototypes_gap = torch.stack(pot_prototypes_gap)  # (C, D)
+        pot_scorer = POTScorer(pot_prototypes_gap, device=device)
+        logger.info(f"POT Branch Enabled: {Config.NUM_CLASSES} prototypes, D={pot_prototypes_gap.shape[1]}, omega={Config.POT_OMEGA}, reg={Config.POT_SINKHORN_REG}")
+    
     correct_param = 0
     correct_nonparam = 0
     correct_fusion = 0
@@ -395,6 +411,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     id_uncertainties_fuse = []
     id_uncertainties_param = []
     id_uncertainties_nonparam = []
+    id_uncertainties_pot = []  # POT branch
     
     # Detailed Logs container
     detailed_logs = []
@@ -405,6 +422,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     
     # Metrics for Plots
     all_correct_fusion = [] # Boolean mask for ID
+    
+    # POT: Accumulate features for batch-level scoring
+    pot_id_features = [] if pot_scorer else None
+    pot_id_batch_sizes = [] if pot_scorer else None
     
     # Time measurement
     start_time = time.time()
@@ -473,7 +494,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 alpha_nonparam = evidence_nonparam + 1
                 
                 # 4. Fusion (OOD branch still uses scaled alpha)
-                alpha_fuse_ood, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
+                if args.adaptive_fusion:
+                    alpha_fuse_ood, u_fuse_ds, C_fuse = fusion_module.adaptive_ds_combination(alpha_param, alpha_nonparam)
+                else:
+                    alpha_fuse_ood, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
                 
                 # FIX: Calculate u_nonparam for ID loop!
                 S_nonparam = torch.sum(alpha_nonparam, dim=1)
@@ -496,7 +520,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             alpha_param_calib = evidence_param_calib + 1
             
             if not args.baseline:
-                 alpha_fuse_calib, _, _ = fusion_module.ds_combination(alpha_param_calib, alpha_nonparam, discount_factor=None)
+                 if args.adaptive_fusion:
+                     alpha_fuse_calib, _, _ = fusion_module.adaptive_ds_combination(alpha_param_calib, alpha_nonparam)
+                 else:
+                     alpha_fuse_calib, _, _ = fusion_module.ds_combination(alpha_param_calib, alpha_nonparam, discount_factor=None)
+
                  probs_fuse_calib = alpha_fuse_calib / torch.sum(alpha_fuse_calib, dim=1, keepdim=True)
             else:
                  probs_fuse_calib = alpha_param_calib / torch.sum(alpha_param_calib, dim=1, keepdim=True)
@@ -516,6 +544,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             id_uncertainties_fuse.extend(u_fuse.cpu().numpy())
             id_uncertainties_param.extend(u_param.cpu().numpy())
             id_uncertainties_nonparam.extend(u_nonparam.cpu().numpy())
+            
+            # POT: Accumulate spatial features for batch-level OT
+            if pot_scorer is not None:
+                pot_id_features.append(features.detach())
+                pot_id_batch_sizes.append(features.shape[0])
             
             all_probs_fusion.append(probs_fuse_calib)
             all_labels_tensor.append(labels)
@@ -557,23 +590,36 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     logger.info(f"ECE Score: {ece_score:.4f}")
     logger.info(f"Inference Latency: {avg_latency_ms:.2f} ms/sample")
     
+    # --- POT: Compute batch-level OT scores for ID data ---
+    if pot_scorer is not None:
+        logger.info(f"Computing POT scores for ID data ({len(pot_id_features)} batches)...")
+        all_id_features = torch.cat(pot_id_features, dim=0)  # (N, C, H, W)
+        pot_id_scores = pot_scorer.compute_contrastive_ot_chunked(
+            all_id_features, 
+            chunk_size=Config.POT_BATCH_SIZE,
+            omega=Config.POT_OMEGA,
+            sinkhorn_reg=Config.POT_SINKHORN_REG,
+            max_iter=Config.POT_SINKHORN_ITER
+        )
+        id_uncertainties_pot = pot_id_scores.cpu().numpy().tolist()
+        logger.info(f"POT ID Scores: Mean={np.mean(id_uncertainties_pot):.4f} Std={np.std(id_uncertainties_pot):.4f}")
+        del all_id_features, pot_id_features  # Free memory
+    
     # -----------------------
     # OOD Evaluation
     # -----------------------
     # Define OOD datasets to test based on current dataset
-    ood_datasets = []
+    # Define OOD datasets to test based on user request: cifar, tinyimagenet, svhn, mnist, textures
     if Config.DATASET_NAME == 'cifar10':
-        ood_datasets = ['svhn', 'cifar100']
+        ood_datasets = ['cifar100', 'tinyimagenet', 'svhn', 'mnist', 'textures']
     elif Config.DATASET_NAME == 'cifar100':
-        ood_datasets = ['svhn', 'cifar10']
-    
-    # Extended OOD datasets (if requested)
-    if args.extended_ood:
-        ood_datasets.extend(['mnist', 'textures', 'tinyimagenet'])  # Removed places365 as per request
-        logger.info(f"Extended OOD mode: Testing {ood_datasets}")
+        ood_datasets = ['cifar10', 'tinyimagenet', 'svhn', 'mnist', 'textures']
+    else:
+        ood_datasets = ['svhn', 'mnist', 'textures', 'tinyimagenet']
     
     # Always keeping Noise for sanity check
-    ood_datasets.append('noise')
+    if 'noise' not in ood_datasets:
+        ood_datasets.append('noise')
     
     ood_results = {}
     
@@ -586,6 +632,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         ood_u_fuse = []
         ood_u_param = []
         ood_u_nonparam = []
+        ood_u_pot = []  # POT branch
+        pot_ood_features = [] if pot_scorer else None  # Accumulate features
         
         current_ood_loop_func = None
         
@@ -674,7 +722,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                         
                         # Conservative Fusion (Method 10)
                         # entropy_param = fusion_module.compute_entropy(alpha_param)
-                        alpha_fuse, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
+                        if args.adaptive_fusion:
+                             alpha_fuse, u_fuse_ds, C_fuse = fusion_module.adaptive_ds_combination(alpha_param, alpha_nonparam)
+                        else:
+                             alpha_fuse, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
                         
                         # Recalculate u_nonparam locally if needed for max
                         S_nonparam = torch.sum(alpha_nonparam, dim=1)
@@ -716,6 +767,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     ood_u_param.extend(u_param.cpu().numpy())
                     ood_u_nonparam.extend(u_nonparam.cpu().numpy())
                     
+                    # POT: Accumulate features
+                    if pot_scorer is not None:
+                        pot_ood_features.append(features.detach())
+                    
                     # Log Sample Details
                     for i in range(images.size(0)):
                         detailed_logs.append({
@@ -750,6 +805,23 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             logger.info(f"  ID OT: Mean={id_ot_np.mean():.4f} Std={id_ot_np.std():.4f} Min={id_ot_np.min():.4f} Max={id_ot_np.max():.4f}")
             logger.info(f"  OOD OT: Mean={ood_ot_np.mean():.4f} Std={ood_ot_np.std():.4f} Min={ood_ot_np.min():.4f} Max={ood_ot_np.max():.4f}")
 
+            # --- POT: Compute batch-level OT scores for OOD data ---
+            auroc_pot = 0.0
+            fpr_pot = 1.0
+            if pot_scorer is not None and pot_ood_features:
+                all_ood_features = torch.cat(pot_ood_features, dim=0)
+                pot_ood_scores = pot_scorer.compute_contrastive_ot_chunked(
+                    all_ood_features,
+                    chunk_size=Config.POT_BATCH_SIZE,
+                    omega=Config.POT_OMEGA,
+                    sinkhorn_reg=Config.POT_SINKHORN_REG,
+                    max_iter=Config.POT_SINKHORN_ITER
+                )
+                ood_u_pot = pot_ood_scores.cpu().numpy().tolist()
+                del all_ood_features, pot_ood_features
+                
+                logger.info(f"  POT OOD Scores: Mean={np.mean(ood_u_pot):.4f} Std={np.std(ood_u_pot):.4f}")
+            
             # Compute AUROC for all branches (Ablation)
             auroc_fuse = compute_auroc(np.array(id_uncertainties_fuse), np.array(ood_u_fuse))
             auroc_param = compute_auroc(np.array(id_uncertainties_param), np.array(ood_u_param))
@@ -760,18 +832,61 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             fpr_param = compute_fpr95(np.array(id_uncertainties_param), np.array(ood_u_param))
             fpr_nonparam = compute_fpr95(np.array(id_uncertainties_nonparam), np.array(ood_u_nonparam))
             
+            # POT metrics & Ensemble
+            auroc_ensemble = 0.0
+            fpr_ensemble = 1.0
+            
+            if pot_scorer is not None and len(ood_u_pot) > 0:
+                auroc_pot = compute_auroc(np.array(id_uncertainties_pot), np.array(ood_u_pot))
+                fpr_pot = compute_fpr95(np.array(id_uncertainties_pot), np.array(ood_u_pot))
+                
+                # --- Adaptive Ensemble (Method 9) ---
+                try:
+                    # 1. Prepare Arrays
+                    id_fuse_np = np.array(id_uncertainties_fuse)
+                    id_pot_np = np.array(id_uncertainties_pot)
+                    ood_fuse_np = np.array(ood_u_fuse)
+                    ood_pot_np = np.array(ood_u_pot)
+                    
+                    # 2. Standardize (Z-Score) based on ID stats
+                    mu_f, std_f = np.mean(id_fuse_np), np.std(id_fuse_np) + 1e-6
+                    mu_p, std_p = np.mean(id_pot_np), np.std(id_pot_np) + 1e-6
+                    
+                    z_id_fuse = (id_fuse_np - mu_f) / std_f
+                    z_id_pot = (id_pot_np - mu_p) / std_p
+                    z_ood_fuse = (ood_fuse_np - mu_f) / std_f
+                    z_ood_pot = (ood_pot_np - mu_p) / std_p
+                    
+                    # 3. Weighted Ensemble
+                    w = args.ensemble_weight
+                    id_ensemble = w * z_id_fuse + (1 - w) * z_id_pot
+                    ood_ensemble = w * z_ood_fuse + (1 - w) * z_ood_pot
+                    
+                    # 4. Compute Metrics
+                    auroc_ensemble = compute_auroc(id_ensemble, ood_ensemble)
+                    fpr_ensemble = compute_fpr95(id_ensemble, ood_ensemble)
+                except Exception as e:
+                    logger.error(f"Ensemble calculation failed: {e}")
+            
             logger.info(f"OOD {ood_name} Results:")
             logger.info(f"  AUROC (Fusion): {auroc_fuse:.4f} | FPR@95: {fpr_fuse:.4f}")
             logger.info(f"  AUROC (Param): {auroc_param:.4f} | FPR@95: {fpr_param:.4f}")
             logger.info(f"  AUROC (OT):    {auroc_nonparam:.4f} | FPR@95: {fpr_nonparam:.4f}")
+            if pot_scorer is not None:
+                logger.info(f"  AUROC (POT):   {auroc_pot:.4f} | FPR@95: {fpr_pot:.4f}")
+                logger.info(f"  AUROC (Ens):   {auroc_ensemble:.4f} | FPR@95: {fpr_ensemble:.4f}")
 
             ood_results[ood_name] = {
                 "auroc_fusion": float(auroc_fuse),
                 "auroc_parametric": float(auroc_param),
                 "auroc_nonparametric": float(auroc_nonparam),
+                "auroc_pot": float(auroc_pot),
+                "auroc_ensemble": float(auroc_ensemble),
                 "fpr95_fusion": float(fpr_fuse),
                 "fpr95_parametric": float(fpr_param),
-                "fpr95_nonparametric": float(fpr_nonparam)
+                "fpr95_nonparametric": float(fpr_nonparam),
+                "fpr95_pot": float(fpr_pot),
+                "fpr95_ensemble": float(fpr_ensemble)
             }
             
             last_ood_uncertainties = ood_u_fuse
@@ -896,6 +1011,14 @@ def main():
     parser.add_argument("--no_conflict", action="store_true", help="Ablation: Disable Conflict term in Fusion (u_fuse = u_fuse_ds only)")
     parser.add_argument("--extended_ood", action="store_true", help="Test extended OOD datasets (Textures, iNaturalist subset)")
     parser.add_argument("--adversarial_vos", action="store_true", help="Enable Adversarial VOS optimization (Phase 10)")
+    parser.add_argument("--pot", action="store_true", help='Enable POT branch (Contrastive OT Score)')
+    parser.add_argument(
+        '--adaptive_fusion',
+        action='store_true', 
+        default=getattr(Config, 'ADAPTIVE_FUSION', False),
+        help='Enable Adaptive Fusion (Discount Parametric based on OT Uncertainty)'
+    )
+    parser.add_argument("--ensemble_weight", type=float, default=0.5, help="Weight for Fusion Score in Adaptive Ensemble (0.0=POT only, 1.0=Fusion only). Default 0.5")
     
     args = parser.parse_args()
     
@@ -903,11 +1026,22 @@ def main():
     Config.load_config(args.config)
 
     # Setup Logger (Early)
-    results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
+    # Add Backbone to Results Directory
+    results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME, Config.BACKBONE.lower())
     if not os.path.exists(results_dir):
          os.makedirs(results_dir)
+         
     from src.utils import setup_logger
-    log_name = f"experiment_{args.log_suffix}" if args.log_suffix else "experiment"
+    
+    # Add timestamp to log filename to avoid overwriting/confusion on same experiment name
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if args.log_suffix:
+        log_name = f"experiment_{args.log_suffix}_{timestamp}"
+    else:
+        log_name = f"experiment_{timestamp}"
+        
     logger = setup_logger(results_dir, name=log_name)
     
     # Apply Overrides
@@ -932,6 +1066,7 @@ def main():
     logger.info("="*30)
     logger.info("Inference Configuration:")
     logger.info(f"Dataset: {Config.DATASET_NAME}")
+    logger.info(f"Backbone: {Config.BACKBONE}")
     logger.info(f"Metric: {Config.METRIC_TYPE}")
     logger.info(f"Fusion: {Config.FUSION_TYPE}")
     logger.info(f"K Neighbors: {Config.K_NEIGHBORS}")

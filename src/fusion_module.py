@@ -134,3 +134,33 @@ class DempsterShaferFusion:
         alpha_fuse = torch.clamp(alpha_fuse, min=1.0)
         
         return alpha_fuse, u_fuse, C
+
+    def adaptive_ds_combination(self, alpha_param, alpha_nonparam):
+        """
+        Adaptive Fusion: Trust Parametric ONLY if Non-Parametric (OT) is certain.
+        If OT is uncertain (high distance), we discount the Parametric belief.
+        This fixes the "Confident but Wrong" problem of Softmax on OOD.
+        
+        Mechanism:
+        trust_param = 1.0 - u_ot
+        alpha_param_new = (alpha_param - 1) * trust_param + 1
+        """
+        # 1. Calculate OT Uncertainty
+        S_ot = torch.sum(alpha_nonparam, dim=1, keepdim=True)
+        # u = K / S
+        u_ot = self.num_classes / S_ot
+        
+        # 2. Calculate Trust Factor
+        # If u_ot is 1.0 (Total OOD), trust is 0.0 -> Param becomes uniform/uncertain.
+        # If u_ot is 0.0 (Perfect ID), trust is 1.0 -> Param kept as is.
+        trust_param = 1.0 - u_ot
+        trust_param = torch.clamp(trust_param, 0.0, 1.0)
+        
+        # 3. Discount Parametric Alpha
+        # alpha = evidence + 1
+        # new_evidence = old_evidence * trust
+        # new_alpha = new_evidence + 1 = (alpha - 1) * trust + 1
+        alpha_param_new = (alpha_param - 1) * trust_param + 1
+        
+        # 4. Standard Fusion with Discounted Param
+        return self.ds_combination(alpha_param_new, alpha_nonparam)

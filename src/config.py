@@ -59,9 +59,19 @@ class Config:
     ADV_VOS_LR = 0.5
     ADV_VOS_STEPS = 5
     
+    # Adaptive Fusion (Phase 14)
+    ADAPTIVE_FUSION = False
+    FUSION_ENTROPY_THRESHOLD = 0.5 # Threshold for high uncertainty
+    
     # ODIN (Phase 11)
     ODIN_TEMP = 1000
     ODIN_EPS = 0.0014
+    
+    # POT: Batch-Level OT with Contrastive Transport Cost
+    POT_OMEGA = 2.0           # Virtual Outlier extrapolation coefficient (>1)
+    POT_SINKHORN_REG = 0.1    # Sinkhorn regularization lambda
+    POT_SINKHORN_ITER = 50    # Sinkhorn iterations
+    POT_BATCH_SIZE = 512      # Batch size for POT (paper default)
 
     @classmethod
     def load_config(cls, config_path):

@@ -124,7 +124,7 @@ def plot_metrics(train_losses, train_accs, val_losses, val_accs):
     
     plt.tight_layout()
     # Save to dataset specific directory
-    save_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
+    save_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME, Config.BACKBONE.lower())
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     plt.savefig(os.path.join(save_dir, 'training_metrics.png'))
@@ -156,7 +156,7 @@ def main():
         os.makedirs(Config.RESULTS_DIR)
         
     # Dataset specific results will be handled in plot_metrics, but good to ensure here too if we save other things
-    results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME)
+    results_dir = os.path.join(Config.RESULTS_DIR, Config.DATASET_NAME, Config.BACKBONE.lower())
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
         
@@ -211,7 +211,7 @@ def main():
         
         if val_acc > best_acc:
             best_acc = val_acc
-            ckpt_name = f"best_resnet18_{Config.DATASET_NAME}.pth"
+            ckpt_name = f"best_{Config.BACKBONE.lower()}_{Config.DATASET_NAME}.pth"
             torch.save(model.state_dict(), os.path.join(Config.Checkpoints_DIR, ckpt_name))
             logger.info(f"Model Saved: {ckpt_name} (New Best Acc/Val: {best_acc:.2f}%)")
             
@@ -222,7 +222,7 @@ def main():
     
     # Auto-Invalidate Support Cache
     # Since model changed, old support set is invalid.
-    support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_support.pt")
+    support_path = os.path.join(Config.Checkpoints_DIR, f"{Config.DATASET_NAME}_{Config.BACKBONE.lower()}_support.pt")
     if os.path.exists(support_path):
         os.remove(support_path)
         logger.info(f"Deleted stale support cache: {support_path}")

@@ -13,8 +13,9 @@ class EvidenceExtractor:
         Common approaches: Relu(logits), Softplus(logits), Exp(logits).
         Plan says: alpha = e_k + 1. 
         """
-        # Using Softplus to ensure positivity
-        evidence = F.softplus(logits)
+        # Using Exp to ensure positivity and match Softmax sharpness
+        # This is critical for large K (e.g. 100) to overcome the S=K Dirichlet prior
+        evidence = torch.exp(logits)
         return evidence
 
     def get_non_parametric_evidence(self, ot_distances, topk_indices, support_labels, gamma_scale=None, vo_distances=None):

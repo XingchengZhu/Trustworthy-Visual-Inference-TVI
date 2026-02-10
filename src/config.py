@@ -46,11 +46,22 @@ class Config:
     
     # Fusion
     FUSION_TYPE = "dempster_shafer" # dempster_shafer, average
+    FUSION_STRATEGY = "yager" # yager (u+=C), dempster (drop C), dubois (distribute C)
     
     # Advanced / Metrics Learning
     CENTER_LOSS_WEIGHT = 0.005 # Default recommendation is 0.003-0.01 for ResNet
     VOS_TYPE = "radial" # "radial" (classic) or "boundary" (between classes)
+    VOS_TYPE = "radial" # "radial" (classic) or "boundary" (between classes)
     VO_BETA = 1.0 # 1.0 for Radial, 0.5 for Boundary
+    
+    # Adversarial VOs (Phase 10)
+    ADVERSARIAL_VOS = False # Default off
+    ADV_VOS_LR = 0.5
+    ADV_VOS_STEPS = 5
+    
+    # ODIN (Phase 11)
+    ODIN_TEMP = 1000
+    ODIN_EPS = 0.0014
 
     @classmethod
     def load_config(cls, config_path):

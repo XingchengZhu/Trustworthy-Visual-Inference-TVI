@@ -87,14 +87,43 @@ class DempsterShaferFusion:
         C = sum_b1 * sum_b2 - sum_b1_b2_dot
         
         # Normalize factor
-        norm = 1 - C + 1e-8 
+        # Dempster: Norm = 1 - C. (Redistribute C to all propositions proportional to mass)
+        # Yager: Norm = 1. (Assign C to Omega/Uncertainty)
         
-        # Fused Belief
-        # b_fuse(A) = (b1(A)b2(Θ) + b1(Θ)b2(A) + b1(A)b2(A)) / (1-C)
-        b_fuse = (b1 * u2 + b2 * u1 + b1 * b2) / norm
-        
-        # Fused Uncertainty
-        u_fuse = (u1 * u2) / norm
+        if getattr(Config, 'FUSION_STRATEGY', 'dempster') == 'yager':
+             # Yager's Rule: C goes to Uncertainty
+             # m(A) = sum(b1*b2)
+             # m(Omega) = u1*u2 + C
+             
+             # Calculate raw intersection masses
+             # b_fuse_unnorm = b1*u2 + b2*u1 + b1*b2 (Intersection)
+             # But strictly Yager:
+             # m(A) = sum_{B \cap D = A} m1(B)m2(D)
+             # For Dirichlet:
+             # m(A): b1(A)b2(A) + b1(A)u2 + u1b2(A)
+             # u_new = u1*u2 + C
+             
+             b_fuse = b1 * u2 + b2 * u1 + b1 * b2
+             u_fuse = u1 * u2 + C
+             
+             # No normalization by (1-C)
+             # Check sum
+             # sum(b_fuse) + u_fuse = ...
+             # sum(b1u2 + b2u1 + b1b2) + u1u2 + C
+             # = u2(1-u1) + u1(1-u2) + sum(b1b2) + u1u2 + C
+             # = u2 - u1u2 + u1 - u1u2 + sum(b1b2) + u1u2 + C
+             # = u1 + u2 - u1u2 + sum(b1b2) + C
+             # C = (1-u1)(1-u2) - sum(b1b2)
+             # C = 1 - u1 - u2 + u1u2 - sum(b1b2)
+             # sum = u1 + u2 - u1u2 + sum(b1b2) + 1 - u1 - u2 + u1u2 - sum(b1b2)
+             # sum = 1.
+             # Correct.
+             
+        else:
+            # Standard Dempster (Drop C)
+            norm = 1 - C + 1e-8 
+            b_fuse = (b1 * u2 + b2 * u1 + b1 * b2) / norm
+            u_fuse = (u1 * u2) / norm
         
         # Convert back to alpha
         # S = K / u

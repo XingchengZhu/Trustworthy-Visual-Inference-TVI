@@ -63,6 +63,11 @@ class OTMetric:
         # Define SPP function (Used for Coarse Filtering)
         def spp_func(x):
             # x: (B, C, H, W)
+            if Config.METRIC_TYPE == 'cosine':
+                # Use GAP for neighbor search to match the final metric
+                p = x.mean(dim=(2, 3)) # (B, C)
+                return p.view(x.size(0), -1)
+            
             levels = [1, 2, 4]
             pooled = []
             for k in levels:
@@ -208,15 +213,37 @@ class OTMetric:
              distances = dists.view(B, k)
 
         elif Config.METRIC_TYPE == 'cosine':
-             scores = torch.bmm(q_in, s_in.transpose(1, 2))
-             # M = 1 - scores?
-             # If N > 1, this is matching sets.
-             # Usually we don't use Cosine for Sets without pooling or OT.
-             # Fallback to mean pooling
-             q_mean = torch.nn.functional.normalize(q_in.mean(dim=1), dim=1)
-             s_mean = torch.nn.functional.normalize(s_in.mean(dim=1), dim=1)
-             dists = 1.0 - (q_mean * s_mean).sum(dim=1)
-             distances = dists.view(B, k)
+             # Standard GAP Cosine Distance (Matches debug_metrics.py [GAP] logic)
+             # Use RAW features (Mean -> Normalize), NOT pixel-normalized (Normalize -> Mean)
+             
+             # 1. GAP on Query
+             # query_features: (B, C, H, W)
+             q_gap = query_features.mean(dim=(2, 3)) # (B, C)
+             q_gap = torch.nn.functional.normalize(q_gap, dim=1)
+             
+             # 2. GAP on Support (Need to gather Top-K)
+             # support_features: (S, C, H, W)
+             s_gap_all = support_features.mean(dim=(2, 3)) # (S, C)
+             s_gap_all = torch.nn.functional.normalize(s_gap_all, dim=1)
+             
+             # Gather Top-K
+             # topk_indices: (B, K)
+             # Expand for gather: (B, K, C)
+             k_indices = topk_indices.unsqueeze(2).expand(-1, -1, C)
+             # We need to gather from (S, C).
+             # s_gap_all is (S, C).
+             # We can just look up.
+             s_gap_batch = s_gap_all[topk_indices] # (B, K, C) via fancy indexing
+             
+             
+             # 3. Compute Distance
+             # q_gap: (B, C) -> (B, 1, C)
+             q_gap_exp = q_gap.unsqueeze(1)
+             
+             # Cosine Sim: (q * s).sum(dim=2)
+             sims = (q_gap_exp * s_gap_batch).sum(dim=2) # (B, K)
+             
+             distances = 1.0 - sims
         else:
              raise ValueError(f"Unknown Metric Type: {Config.METRIC_TYPE}")
              

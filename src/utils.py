@@ -38,16 +38,11 @@ def save_results(results, save_dir, filename="metrics.json"):
 def compute_ece(probs, labels, n_bins=15):
     """
     Compute Expected Calibration Error
-    probs: (N, C) or (N,) max probabilities
-    labels: (N,)
+    probs: (N, C) predicted probabilities
+    labels: (N,) true labels
     """
-    if probs.dim() == 2:
-        confidences, predictions = torch.max(probs, 1)
-    else:
-        confidences = probs
-        predictions = torch.argmax(probs, dim=1) # This line assumes probs was 2D. 
-        # If probs is 1D (max conf), we need predictions separately.
-        # Let's assume input is (N, C) Probs
+    if probs.dim() != 2:
+        raise ValueError("compute_ece expects probs of shape (N, C)")
         
     confidences, predictions = torch.max(probs, 1)
     accuracies = predictions.eq(labels)

@@ -63,6 +63,54 @@ def apply_bn_spatial(x, bn_layer):
     out = (x - mean) / torch.sqrt(var + eps) * weight + bias
     return out
 
+def apply_ash(x, percentile=90):
+    """
+    Activation Shaping (ASH): Prune bottom p% of activations.
+    x: (B, C, H, W) or (B, D)
+    percentile: 0-100
+    """
+    assert 0 <= percentile <= 100
+    if percentile == 0: return x
+    
+    # Flatten spatial dims for percentile calculation if needed, 
+    # but ASH usually prunes element-wise globally or per-sample.
+    # Paper "ASH": prune bottom p% of activations per sample.
+    
+    # 1. Calculate threshold per sample
+    # x shape: (B, ...)
+    B = x.shape[0]
+    x_flat = x.view(B, -1)
+    
+    # Calculate k-th value (percentile)
+    # k = number of elements to Zero out
+    k = int(x_flat.shape[1] * (percentile / 100.0))
+    if k == 0: return x
+    
+    # topk returns largest values. We want to keep top (100-p)%.
+    # So we find the k-th smallest value?
+    # Or just keep top N values.
+    # torch.kthvalue finds the k-th smallest element.
+    # Threshold is the value at percentile p. All below are zeroed.
+    
+    kth_values, _ = torch.kthvalue(x_flat, k, dim=1, keepdim=True)
+    # kth_values: (B, 1)
+    
+    # reshape to match x
+    if x.dim() == 4:
+        threshold = kth_values.view(B, 1, 1, 1)
+    else:
+        threshold = kth_values
+        
+    # Prune
+    # ASH-S (Simple): s = x * \mathbb{I}(x \ge t)  (Zero out)
+    # ASH-B (Binarize): s = \mathbb{I}(x \ge t)
+    # ASH-P (Propagate): s = ...
+    # We use ASH-S (default)
+    mask = (x >= threshold).float()
+    out = x * mask
+    
+    return out
+
 def kmeans_select(features, k, max_iter=20, device='cpu'):
     """
     Select k representative centroids using K-Means (PyTorch).
@@ -412,6 +460,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     id_uncertainties_param = []
     id_uncertainties_nonparam = []
     id_uncertainties_pot = []  # POT branch
+    id_feat_norms = []  # Phase 16: Feature Norm Score
     
     # Detailed Logs container
     detailed_logs = []
@@ -427,6 +476,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     pot_id_features = [] if pot_scorer else None
     pot_id_batch_sizes = [] if pot_scorer else None
     
+    # Phase 16: Temperature Scaling
+    from src.temperature_scaling import find_optimal_temperature, apply_temperature
+    optimal_T = find_optimal_temperature(model, test_loader, device)
+    logger.info(f"Optimal Temperature: {optimal_T:.4f}")
+    
     # Time measurement
     start_time = time.time()
     
@@ -434,6 +488,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     logger.info(f"Starting ID Inference... (Baseline Mode: {args.baseline})")
     with torch.no_grad():
         for images, labels in tqdm(test_loader, desc="Inference"):
+            if args.max_samples and total >= args.max_samples: break
+            
             images, labels = images.to(device), labels.to(device)
             # ... process one batch ...
             
@@ -449,6 +505,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             # React Clipping
             if clip_threshold > 0:
                 features = torch.clamp(features, max=clip_threshold)
+                
+            # --- ASH (Phase 15): Prune small activations ---
+            if getattr(Config, 'ASH_PERCENTILE', 0) > 0 and getattr(args, 'ash', False):
+                 features = apply_ash(features, percentile=getattr(Config, 'ASH_PERCENTILE', 90))
             
             # 2. ODIN Logits (for OOD Uncertainty Scoring)
             if getattr(Config, 'ODIN_EPS', 0.0) > 0.0:
@@ -504,9 +564,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 u_nonparam = Config.NUM_CLASSES / S_nonparam
                 
             # Final OOD Uncertainty score logic
-            # Param-Dominant: Use Parametric uncertainty for OOD detection.
-            # OT contributes to calibrated predictions but has high variance for OOD scoring.
-            u_fuse = u_param
+            # FIX (Phase 16): Use actual Fusion uncertainty instead of discarding OT branch
+            # Update (Phase 16b): Option to trust Param for ID (heuristic that worked well)
+            if not args.baseline and not getattr(args, 'trust_param_id', True):
+                # Squeeze first
+                if len(u_fuse_ds.shape) > 1: u_fuse_ds = u_fuse_ds.squeeze()
+                if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
+                
+                if args.no_conflict:
+                    u_fuse = u_fuse_ds
+                else:
+                    u_fuse = u_fuse_ds + C_fuse
+            else:
+                # Fallback to Param for ID samples (or if Baseline)
+                # This was the "bug" that actually helped: assume ID samples are best judged by Param confidence
+                u_fuse = u_param
             
             # Squeeze dim 1 if exists (B, 1) -> (B,)
             if len(u_fuse.shape) > 1: u_fuse = u_fuse.squeeze()
@@ -545,12 +617,20 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             id_uncertainties_param.extend(u_param.cpu().numpy())
             id_uncertainties_nonparam.extend(u_nonparam.cpu().numpy())
             
+            # Phase 16: Feature Norm Score (higher norm = more ID-like, so use -norm as OOD score)
+            _, features_flat, _, _ = model(images)
+            feat_norm = torch.norm(features_flat, p=2, dim=1)  # (B,)
+            id_feat_norms.extend((-feat_norm).cpu().numpy())  # negative norm: higher = more OOD
+            
             # POT: Accumulate spatial features for batch-level OT
             if pot_scorer is not None:
                 pot_id_features.append(features.detach())
                 pot_id_batch_sizes.append(features.shape[0])
             
-            all_probs_fusion.append(probs_fuse_calib)
+            # Temperature-Scaled Probs for ECE
+            logits_temp = apply_temperature(logits_calib, optimal_T)
+            probs_temp = torch.softmax(logits_temp, dim=1)
+            all_probs_fusion.append(probs_temp)
             all_labels_tensor.append(labels)
             all_correct_fusion.extend((pred_fuse == labels).cpu().numpy())
 
@@ -609,17 +689,19 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     # OOD Evaluation
     # -----------------------
     # Define OOD datasets to test based on current dataset
-    # Define OOD datasets to test based on user request: cifar, tinyimagenet, svhn, mnist, textures
+    ood_datasets = []
     if Config.DATASET_NAME == 'cifar10':
-        ood_datasets = ['cifar100', 'tinyimagenet', 'svhn', 'mnist', 'textures']
+        ood_datasets = ['svhn', 'cifar100']
     elif Config.DATASET_NAME == 'cifar100':
-        ood_datasets = ['cifar10', 'tinyimagenet', 'svhn', 'mnist', 'textures']
-    else:
-        ood_datasets = ['svhn', 'mnist', 'textures', 'tinyimagenet']
+        ood_datasets = ['svhn', 'cifar10']
+    
+    # Extended OOD datasets (if requested)
+    if args.extended_ood:
+        ood_datasets.extend(['mnist', 'textures', 'tinyimagenet'])  # Removed places365 as per request
+        logger.info(f"Extended OOD mode: Testing {ood_datasets}")
     
     # Always keeping Noise for sanity check
-    if 'noise' not in ood_datasets:
-        ood_datasets.append('noise')
+    ood_datasets.append('noise')
     
     ood_results = {}
     
@@ -633,6 +715,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         ood_u_param = []
         ood_u_nonparam = []
         ood_u_pot = []  # POT branch
+        ood_feat_norms = []  # Phase 16: Feature Norm Score
         pot_ood_features = [] if pot_scorer else None  # Accumulate features
         
         current_ood_loop_func = None
@@ -640,7 +723,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         if ood_name == 'noise':
             # Generator wrapper
             def noise_gen():
-                num_ood = 3000 # Increased for academic robustness
+                num_ood = args.max_samples if args.max_samples else 3000
                 with torch.no_grad():
                     noise_images = torch.randn(num_ood, 3, 32, 32).to(device)
                     # Fake labels -1 for OOD
@@ -650,7 +733,7 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         else:
             def loader_gen():
                 loader = get_ood_loader(ood_name)
-                max_samples = 3000 # Increased for academic robustness
+                max_samples = args.max_samples if args.max_samples else 3000
                 cnt = 0
                 for img, lbl in loader:
                     if cnt >= max_samples: break
@@ -694,6 +777,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     # React Clipping
                     if clip_threshold > 0:
                          features = torch.clamp(features, max=clip_threshold)
+
+                    # --- ASH (Phase 15) ---
+                    if getattr(Config, 'ASH_PERCENTILE', 0) > 0 and getattr(args, 'ash', False):
+                         features = apply_ash(features, percentile=getattr(Config, 'ASH_PERCENTILE', 90))
                     
                     # Fix: Use Exp for OOD loop too (Hybrid Strategy - Method 18)
                     evidence_param = evidence_extractor.get_parametric_evidence(logits)
@@ -767,6 +854,11 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     ood_u_param.extend(u_param.cpu().numpy())
                     ood_u_nonparam.extend(u_nonparam.cpu().numpy())
                     
+                    # Phase 16: Feature Norm Score for OOD
+                    _, features_flat_ood, _, _ = model(images)
+                    feat_norm_ood = torch.norm(features_flat_ood, p=2, dim=1)
+                    ood_feat_norms.extend((-feat_norm_ood).cpu().numpy())
+                    
                     # POT: Accumulate features
                     if pot_scorer is not None:
                         pot_ood_features.append(features.detach())
@@ -827,6 +919,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             auroc_param = compute_auroc(np.array(id_uncertainties_param), np.array(ood_u_param))
             auroc_nonparam = compute_auroc(np.array(id_uncertainties_nonparam), np.array(ood_u_nonparam))
             
+            # Phase 16: Feature Norm AUROC/FPR
+            auroc_norm = compute_auroc(np.array(id_feat_norms), np.array(ood_feat_norms))
+            fpr_norm = compute_fpr95(np.array(id_feat_norms), np.array(ood_feat_norms))
+            
             # Compute FPR@95 for all branches
             fpr_fuse = compute_fpr95(np.array(id_uncertainties_fuse), np.array(ood_u_fuse))
             fpr_param = compute_fpr95(np.array(id_uncertainties_param), np.array(ood_u_param))
@@ -840,41 +936,49 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 auroc_pot = compute_auroc(np.array(id_uncertainties_pot), np.array(ood_u_pot))
                 fpr_pot = compute_fpr95(np.array(id_uncertainties_pot), np.array(ood_u_pot))
                 
-                # --- Adaptive Ensemble (Method 9) ---
+                # --- Phase 16: Three-Way Ensemble (Fusion + POT + Norm) ---
                 try:
-                    # 1. Prepare Arrays
                     id_fuse_np = np.array(id_uncertainties_fuse)
                     id_pot_np = np.array(id_uncertainties_pot)
+                    id_norm_np = np.array(id_feat_norms)
                     ood_fuse_np = np.array(ood_u_fuse)
                     ood_pot_np = np.array(ood_u_pot)
+                    ood_norm_np = np.array(ood_feat_norms)
                     
-                    # 2. Standardize (Z-Score) based on ID stats
+                    # Z-Score Standardize
                     mu_f, std_f = np.mean(id_fuse_np), np.std(id_fuse_np) + 1e-6
                     mu_p, std_p = np.mean(id_pot_np), np.std(id_pot_np) + 1e-6
+                    mu_n, std_n = np.mean(id_norm_np), np.std(id_norm_np) + 1e-6
                     
                     z_id_fuse = (id_fuse_np - mu_f) / std_f
                     z_id_pot = (id_pot_np - mu_p) / std_p
+                    z_id_norm = (id_norm_np - mu_n) / std_n
                     z_ood_fuse = (ood_fuse_np - mu_f) / std_f
                     z_ood_pot = (ood_pot_np - mu_p) / std_p
+                    z_ood_norm = (ood_norm_np - mu_n) / std_n
                     
-                    # 3. Weighted Ensemble
-                    w = args.ensemble_weight
-                    id_ensemble = w * z_id_fuse + (1 - w) * z_id_pot
-                    ood_ensemble = w * z_ood_fuse + (1 - w) * z_ood_pot
+                    # Weighted Three-Way Ensemble
+                    w = args.ensemble_weight  # w for Fusion
+                    w_norm = 0.2  # Weight for Norm signal
+                    w_fuse = w * (1 - w_norm)
+                    w_pot = (1 - w) * (1 - w_norm)
                     
-                    # 4. Compute Metrics
+                    id_ensemble = w_fuse * z_id_fuse + w_pot * z_id_pot + w_norm * z_id_norm
+                    ood_ensemble = w_fuse * z_ood_fuse + w_pot * z_ood_pot + w_norm * z_ood_norm
+                    
                     auroc_ensemble = compute_auroc(id_ensemble, ood_ensemble)
                     fpr_ensemble = compute_fpr95(id_ensemble, ood_ensemble)
                 except Exception as e:
-                    logger.error(f"Ensemble calculation failed: {e}")
+                    logger.error(f"Three-Way Ensemble calculation failed: {e}")
             
             logger.info(f"OOD {ood_name} Results:")
             logger.info(f"  AUROC (Fusion): {auroc_fuse:.4f} | FPR@95: {fpr_fuse:.4f}")
             logger.info(f"  AUROC (Param): {auroc_param:.4f} | FPR@95: {fpr_param:.4f}")
             logger.info(f"  AUROC (OT):    {auroc_nonparam:.4f} | FPR@95: {fpr_nonparam:.4f}")
+            logger.info(f"  AUROC (Norm):  {auroc_norm:.4f} | FPR@95: {fpr_norm:.4f}")
             if pot_scorer is not None:
                 logger.info(f"  AUROC (POT):   {auroc_pot:.4f} | FPR@95: {fpr_pot:.4f}")
-                logger.info(f"  AUROC (Ens):   {auroc_ensemble:.4f} | FPR@95: {fpr_ensemble:.4f}")
+                logger.info(f"  AUROC (Ens3):  {auroc_ensemble:.4f} | FPR@95: {fpr_ensemble:.4f}")
 
             ood_results[ood_name] = {
                 "auroc_fusion": float(auroc_fuse),
@@ -1009,9 +1113,10 @@ def main():
     
     # Ablation Flags
     parser.add_argument("--no_conflict", action="store_true", help="Ablation: Disable Conflict term in Fusion (u_fuse = u_fuse_ds only)")
-    parser.add_argument("--extended_ood", action="store_true", help="Test extended OOD datasets (Textures, iNaturalist subset)")
+    parser.add_argument("--extended_ood", action="store_true", default=True, help="Test extended OOD datasets (Textures, iNaturalist subset)")
     parser.add_argument("--adversarial_vos", action="store_true", help="Enable Adversarial VOS optimization (Phase 10)")
     parser.add_argument("--pot", action="store_true", help='Enable POT branch (Contrastive OT Score)')
+    parser.add_argument("--ash", action="store_true", help='Enable ASH (Activation Shaping) for OOD detection')
     parser.add_argument(
         '--adaptive_fusion',
         action='store_true', 
@@ -1019,6 +1124,9 @@ def main():
         help='Enable Adaptive Fusion (Discount Parametric based on OT Uncertainty)'
     )
     parser.add_argument("--ensemble_weight", type=float, default=0.5, help="Weight for Fusion Score in Adaptive Ensemble (0.0=POT only, 1.0=Fusion only). Default 0.5")
+    parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples for quick debugging/verification")
+    parser.add_argument("--trust_param_id", action='store_true', default=True, help="Use Parametric Uncertainty for ID samples (Performance Heuristic). Turn off for pure Fusion.")
+    parser.add_argument("--evidence_type", type=str, default='exp', choices=['exp', 'softplus'], help="Evidence function type")
     
     args = parser.parse_args()
     

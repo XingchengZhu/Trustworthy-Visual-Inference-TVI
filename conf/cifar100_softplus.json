@@ -1,0 +1,21 @@
+{
+    "dataset_name": "cifar100",
+    "backbone": "resnet18",
+    "num_classes": 100,
+    "batch_size": 128,
+    "epochs": 100,
+    "lr": 0.1,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "num_support_samples": 5000,
+    "sinkhorn_eps": 0.05,
+    "sinkhorn_max_iter": 100,
+    "k_neighbors": 10,
+    "metric_type": "cosine",
+    "evidence_scale": 100.0,
+    "rbf_gamma": 20.0,
+    "vos_type": "boundary",
+    "vo_beta": 0.5,
+    "odin_temp": 1.0,
+    "odin_eps": 0.0
+}

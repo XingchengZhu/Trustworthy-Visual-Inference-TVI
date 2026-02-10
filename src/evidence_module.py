@@ -10,12 +10,19 @@ class EvidenceExtractor:
     def get_parametric_evidence(self, logits):
         """
         Convert logits to evidence.
-        Common approaches: Relu(logits), Softplus(logits), Exp(logits).
-        Plan says: alpha = e_k + 1. 
+        Supports 'exp' (original, sharp) and 'softplus' (bounded).
         """
-        # Using Exp to ensure positivity and match Softmax sharpness
-        # This is critical for large K (e.g. 100) to overcome the S=K Dirichlet prior
-        evidence = torch.exp(logits)
+        if getattr(Config, 'EVIDENCE_TYPE', 'exp') == 'softplus':
+             evidence = F.softplus(logits) * Config.EVIDENCE_SCALE
+        else:
+             evidence = torch.exp(logits) * (Config.EVIDENCE_SCALE / 10000.0 if Config.EVIDENCE_SCALE != 10000.0 else 1.0)
+             # Default Exp doesn't usually use scale, but we can allow it.
+             # Legacy behavior: Exp(logits) directly.
+             if Config.EVIDENCE_SCALE == 10000.0: # Heuristic to detect if using default scale for exp
+                 evidence = torch.exp(logits)
+             else:
+                 evidence = torch.exp(logits)
+        
         return evidence
 
     def get_non_parametric_evidence(self, ot_distances, topk_indices, support_labels, gamma_scale=None, vo_distances=None):

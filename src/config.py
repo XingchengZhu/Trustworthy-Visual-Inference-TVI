@@ -72,6 +72,13 @@ class Config:
     POT_SINKHORN_REG = 0.1    # Sinkhorn regularization lambda
     POT_SINKHORN_ITER = 50    # Sinkhorn iterations
     POT_BATCH_SIZE = 512      # Batch size for POT (paper default)
+    
+    # --- ASH (Activation Shaping) ---
+    ASH_PERCENTILE = 90       # Prune bottom 90% of activations (keep top 10%)
+    
+    # --- LogitNorm ---
+    USE_LOGITNORM = False     # Use LogitNorm in model (requires retraining)
+    LOGITNORM_TEMP = 0.05     # Temperature for LogitNorm
 
     @classmethod
     def load_config(cls, config_path):

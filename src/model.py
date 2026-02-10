@@ -73,8 +73,25 @@ class ResNetBackbone(nn.Module):
         # BN (Feature Norm)
         features = self.bn(features)
         
-        # Classification Logits
-        logits = self.resnet.fc(features)
+        if getattr(Config, 'USE_LOGITNORM', False):
+            # LogitNorm: Normalize Feature and Weight, then scale by Temperature
+            # 1. Normalize Features
+            features_norm = F.normalize(features, p=2, dim=1)
+            
+            # 2. Normalize Weights (fc.weight is [Classes, Features])
+            weight_norm = F.normalize(self.resnet.fc.weight, p=2, dim=1)
+            
+            # 3. Cosine Similarity (matmul)
+            logits = F.linear(features_norm, weight_norm)
+            
+            # 4. Scale by Temperature
+            # Note: Config.LOGITNORM_TEMP should be small (e.g. 0.01 - 0.1)
+            t = getattr(Config, 'LOGITNORM_TEMP', 0.05)
+            logits = logits / t
+            
+        else:
+            # Standard Linear Layer
+            logits = self.resnet.fc(features)
         
         # Projection for SupCon
         projected = self.projection_head(features)

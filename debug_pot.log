@@ -1,0 +1,106 @@
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Using device: mps
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - ==============================
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Inference Configuration:
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Dataset: cifar100
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Backbone: resnet18
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Metric: cosine
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Fusion: dempster_shafer
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - K Neighbors: 10
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Sinkhorn Eps: 0.05
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - RBF Gamma: 20.0
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Support Size: 5000
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - Seed: 42
+2026-02-10 14:06:51,106 - experiment_pot_debug_20260210_140651 - INFO - ==============================
+2026-02-10 14:06:52,624 - experiment_pot_debug_20260210_140651 - INFO - Loading checkpoint from checkpoints/best_resnet18_cifar100.pth
+2026-02-10 14:06:52,678 - experiment_pot_debug_20260210_140651 - INFO - Loading cached support set from checkpoints/cifar100_resnet18_support.pt
+2026-02-10 14:06:52,891 - experiment_pot_debug_20260210_140651 - INFO - Forcing Config Gamma (20.0) for Cosine Metric.
+2026-02-10 14:06:53,085 - experiment_pot_debug_20260210_140651 - INFO - POT Branch Enabled: 100 prototypes, D=512, omega=2.0, reg=0.1
+2026-02-10 14:06:53,085 - experiment_pot_debug_20260210_140651 - INFO - Starting ID Inference... (Baseline Mode: False)
+Loaded configuration from conf/cifar100.json
+Inference:   0%|          | 0/79 [00:00<?, ?it/s]Inference:   1%|▏         | 1/79 [00:04<06:11,  4.76s/it]Inference:   3%|▎         | 2/79 [00:05<03:16,  2.55s/it]Inference:   4%|▍         | 3/79 [00:06<02:19,  1.84s/it]Inference:   5%|▌         | 4/79 [00:07<01:52,  1.50s/it]Inference:   6%|▋         | 5/79 [00:08<01:36,  1.31s/it]Inference:   8%|▊         | 6/79 [00:09<01:26,  1.19s/it]Inference:   9%|▉         | 7/79 [00:10<01:19,  1.11s/it]Inference:  10%|█         | 8/79 [00:11<01:15,  1.07s/it]Inference:  11%|█▏        | 9/79 [00:12<01:11,  1.03s/it]Inference:  13%|█▎        | 10/79 [00:13<01:09,  1.01s/it]Inference:  14%|█▍        | 11/79 [00:14<01:05,  1.04it/s]Inference:  15%|█▌        | 12/79 [00:15<01:04,  1.03it/s]Inference:  16%|█▋        | 13/79 [00:16<01:03,  1.04it/s]Inference:  18%|█▊        | 14/79 [00:17<01:02,  1.04it/s]Inference:  19%|█▉        | 15/79 [00:18<01:01,  1.03it/s]Inference:  20%|██        | 16/79 [00:19<01:01,  1.03it/s]Inference:  22%|██▏       | 17/79 [00:20<01:01,  1.01it/s]Inference:  23%|██▎       | 18/79 [00:21<00:59,  1.02it/s]Inference:  24%|██▍       | 19/79 [00:22<00:58,  1.03it/s]Inference:  25%|██▌       | 20/79 [00:22<00:55,  1.07it/s]Inference:  27%|██▋       | 21/79 [00:23<00:52,  1.11it/s]Inference:  28%|██▊       | 22/79 [00:24<00:51,  1.11it/s]Inference:  29%|██▉       | 23/79 [00:25<00:51,  1.10it/s]Inference:  30%|███       | 24/79 [00:26<00:51,  1.07it/s]Inference:  32%|███▏      | 25/79 [00:27<00:53,  1.00it/s]Inference:  33%|███▎      | 26/79 [00:28<00:52,  1.01it/s]Inference:  34%|███▍      | 27/79 [00:29<00:51,  1.02it/s]Inference:  35%|███▌      | 28/79 [00:30<00:49,  1.03it/s]Inference:  37%|███▋      | 29/79 [00:31<00:48,  1.03it/s]Inference:  38%|███▊      | 30/79 [00:32<00:47,  1.02it/s]Inference:  39%|███▉      | 31/79 [00:33<00:46,  1.02it/s]Inference:  41%|████      | 32/79 [00:34<00:46,  1.01it/s]Inference:  42%|████▏     | 33/79 [00:35<00:46,  1.00s/it]Inference:  43%|████▎     | 34/79 [00:36<00:44,  1.00it/s]Inference:  44%|████▍     | 35/79 [00:37<00:43,  1.00it/s]Inference:  46%|████▌     | 36/79 [00:38<00:42,  1.01it/s]Inference:  47%|████▋     | 37/79 [00:39<00:41,  1.02it/s]Inference:  48%|████▊     | 38/79 [00:40<00:39,  1.03it/s]Inference:  49%|████▉     | 39/79 [00:41<00:38,  1.03it/s]Inference:  51%|█████     | 40/79 [00:42<00:38,  1.02it/s]Inference:  52%|█████▏    | 41/79 [00:43<00:37,  1.02it/s]Inference:  53%|█████▎    | 42/79 [00:44<00:35,  1.03it/s]Inference:  54%|█████▍    | 43/79 [00:45<00:34,  1.04it/s]Inference:  56%|█████▌    | 44/79 [00:46<00:33,  1.04it/s]Inference:  57%|█████▋    | 45/79 [00:47<00:32,  1.05it/s]Inference:  58%|█████▊    | 46/79 [00:48<00:31,  1.05it/s]Inference:  59%|█████▉    | 47/79 [00:49<00:30,  1.06it/s]Inference:  61%|██████    | 48/79 [00:50<00:29,  1.05it/s]Inference:  62%|██████▏   | 49/79 [00:51<00:28,  1.05it/s]Inference:  63%|██████▎   | 50/79 [00:51<00:27,  1.06it/s]Inference:  65%|██████▍   | 51/79 [00:52<00:25,  1.08it/s]Inference:  66%|██████▌   | 52/79 [00:53<00:24,  1.09it/s]Inference:  67%|██████▋   | 53/79 [00:54<00:23,  1.12it/s]Inference:  68%|██████▊   | 54/79 [00:55<00:22,  1.09it/s]Inference:  70%|██████▉   | 55/79 [00:56<00:21,  1.11it/s]Inference:  71%|███████   | 56/79 [00:57<00:21,  1.09it/s]Inference:  72%|███████▏  | 57/79 [00:58<00:20,  1.08it/s]Inference:  73%|███████▎  | 58/79 [00:59<00:19,  1.07it/s]Inference:  75%|███████▍  | 59/79 [01:00<00:18,  1.08it/s]Inference:  76%|███████▌  | 60/79 [01:01<00:17,  1.08it/s]Inference:  77%|███████▋  | 61/79 [01:01<00:16,  1.10it/s]Inference:  78%|███████▊  | 62/79 [01:02<00:15,  1.08it/s]Inference:  80%|███████▉  | 63/79 [01:03<00:14,  1.07it/s]Inference:  81%|████████  | 64/79 [01:04<00:14,  1.07it/s]Inference:  82%|████████▏ | 65/79 [01:05<00:13,  1.07it/s]Inference:  84%|████████▎ | 66/79 [01:06<00:12,  1.07it/s]Inference:  85%|████████▍ | 67/79 [01:07<00:11,  1.06it/s]Inference:  86%|████████▌ | 68/79 [01:08<00:10,  1.05it/s]Inference:  87%|████████▋ | 69/79 [01:09<00:09,  1.04it/s]Inference:  89%|████████▊ | 70/79 [01:10<00:08,  1.04it/s]Inference:  90%|████████▉ | 71/79 [01:11<00:07,  1.04it/s]Inference:  91%|█████████ | 72/79 [01:12<00:06,  1.06it/s]Inference:  92%|█████████▏| 73/79 [01:13<00:05,  1.05it/s]Inference:  94%|█████████▎| 74/79 [01:14<00:04,  1.06it/s]Inference:  95%|█████████▍| 75/79 [01:15<00:03,  1.06it/s]Inference:  96%|█████████▌| 76/79 [01:16<00:02,  1.08it/s]Inference:  97%|█████████▋| 77/79 [01:17<00:01,  1.09it/s]Inference:  99%|█████████▊| 78/79 [01:18<00:00,  1.08it/s]Inference: 100%|██████████| 79/79 [01:18<00:00,  1.40it/s]Inference: 100%|██████████| 79/79 [01:28<00:00,  1.12s/it]
+2026-02-10 14:08:21,557 - experiment_pot_debug_20260210_140651 - INFO - Parametric Acc: 78.11%
+2026-02-10 14:08:21,557 - experiment_pot_debug_20260210_140651 - INFO - Non-Parametric Acc: 77.39%
+2026-02-10 14:08:21,557 - experiment_pot_debug_20260210_140651 - INFO - Fused Acc: 77.85%
+2026-02-10 14:08:21,557 - experiment_pot_debug_20260210_140651 - INFO - ECE Score: 0.0670
+2026-02-10 14:08:21,557 - experiment_pot_debug_20260210_140651 - INFO - Inference Latency: 8.85 ms/sample
+2026-02-10 14:08:21,557 - experiment_pot_debug_20260210_140651 - INFO - Computing POT scores for ID data (79 batches)...
+2026-02-10 14:08:22,234 - experiment_pot_debug_20260210_140651 - INFO - POT ID Scores: Mean=-5.8244 Std=0.3670
+2026-02-10 14:08:22,234 - experiment_pot_debug_20260210_140651 - INFO - Extended OOD mode: Testing ['svhn', 'cifar10', 'mnist', 'textures', 'tinyimagenet']
+2026-02-10 14:08:22,234 - experiment_pot_debug_20260210_140651 - INFO - Starting OOD (svhn) Inference...
+2026-02-10 14:08:59,661 - experiment_pot_debug_20260210_140651 - INFO - DEBUG Stats for svhn:
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   ID Fuse: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   OOD Fuse: Mean=0.4326 Std=0.1901 Min=0.0001 Max=1.1489
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   Separation (Fuse): Min(OOD) - Max(ID) = -0.4724
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   ID Param: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   OOD Param: Mean=0.2730 Std=0.1457 Min=0.0000 Max=0.4720
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   ID OT: Mean=0.1353 Std=0.2647 Min=0.0014 Max=0.9929
+2026-02-10 14:08:59,662 - experiment_pot_debug_20260210_140651 - INFO -   OOD OT: Mean=0.5347 Std=0.3823 Min=0.0020 Max=0.9955
+2026-02-10 14:08:59,753 - experiment_pot_debug_20260210_140651 - INFO -   POT OOD Scores: Mean=-5.2594 Std=0.2287
+2026-02-10 14:08:59,766 - experiment_pot_debug_20260210_140651 - INFO - OOD svhn Results:
+2026-02-10 14:08:59,766 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Fusion): 0.9431 | FPR@95: 0.2129
+2026-02-10 14:08:59,766 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Param): 0.8707 | FPR@95: 0.5895
+2026-02-10 14:08:59,766 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (OT):    0.8335 | FPR@95: 0.6689
+2026-02-10 14:08:59,766 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (POT):   0.8855 | FPR@95: 0.7100
+2026-02-10 14:08:59,766 - experiment_pot_debug_20260210_140651 - INFO - Starting OOD (cifar10) Inference...
+2026-02-10 14:09:34,691 - experiment_pot_debug_20260210_140651 - INFO - DEBUG Stats for cifar10:
+2026-02-10 14:09:34,692 - experiment_pot_debug_20260210_140651 - INFO -   ID Fuse: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:09:34,692 - experiment_pot_debug_20260210_140651 - INFO -   OOD Fuse: Mean=0.4223 Std=0.2390 Min=0.0000 Max=1.1797
+2026-02-10 14:09:34,693 - experiment_pot_debug_20260210_140651 - INFO -   Separation (Fuse): Min(OOD) - Max(ID) = -0.4724
+2026-02-10 14:09:34,693 - experiment_pot_debug_20260210_140651 - INFO -   ID Param: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:09:34,693 - experiment_pot_debug_20260210_140651 - INFO -   OOD Param: Mean=0.2042 Std=0.1480 Min=0.0000 Max=0.4584
+2026-02-10 14:09:34,693 - experiment_pot_debug_20260210_140651 - INFO -   ID OT: Mean=0.1353 Std=0.2647 Min=0.0014 Max=0.9929
+2026-02-10 14:09:34,693 - experiment_pot_debug_20260210_140651 - INFO -   OOD OT: Mean=0.4304 Std=0.3719 Min=0.0015 Max=0.9965
+2026-02-10 14:09:34,801 - experiment_pot_debug_20260210_140651 - INFO -   POT OOD Scores: Mean=-5.3699 Std=0.3118
+2026-02-10 14:09:34,811 - experiment_pot_debug_20260210_140651 - INFO - OOD cifar10 Results:
+2026-02-10 14:09:34,811 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Fusion): 0.9168 | FPR@95: 0.3076
+2026-02-10 14:09:34,811 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Param): 0.8023 | FPR@95: 0.7842
+2026-02-10 14:09:34,811 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (OT):    0.7870 | FPR@95: 0.7865
+2026-02-10 14:09:34,811 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (POT):   0.8216 | FPR@95: 0.7933
+2026-02-10 14:09:34,811 - experiment_pot_debug_20260210_140651 - INFO - Starting OOD (mnist) Inference...
+2026-02-10 14:09:59,030 - experiment_pot_debug_20260210_140651 - INFO - DEBUG Stats for mnist:
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   ID Fuse: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   OOD Fuse: Mean=0.3578 Std=0.2323 Min=0.0000 Max=1.1447
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   Separation (Fuse): Min(OOD) - Max(ID) = -0.4724
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   ID Param: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   OOD Param: Mean=0.1535 Std=0.1257 Min=0.0000 Max=0.4633
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   ID OT: Mean=0.1353 Std=0.2647 Min=0.0014 Max=0.9929
+2026-02-10 14:09:59,031 - experiment_pot_debug_20260210_140651 - INFO -   OOD OT: Mean=0.3267 Std=0.3119 Min=0.0021 Max=0.9854
+2026-02-10 14:09:59,110 - experiment_pot_debug_20260210_140651 - INFO -   POT OOD Scores: Mean=-5.2162 Std=0.1101
+2026-02-10 14:09:59,121 - experiment_pot_debug_20260210_140651 - INFO - OOD mnist Results:
+2026-02-10 14:09:59,121 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Fusion): 0.8840 | FPR@95: 0.4147
+2026-02-10 14:09:59,121 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Param): 0.7585 | FPR@95: 0.9284
+2026-02-10 14:09:59,121 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (OT):    0.7520 | FPR@95: 0.9424
+2026-02-10 14:09:59,121 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (POT):   0.9185 | FPR@95: 0.8392
+2026-02-10 14:09:59,121 - experiment_pot_debug_20260210_140651 - INFO - Starting OOD (textures) Inference...
+2026-02-10 14:10:33,581 - experiment_pot_debug_20260210_140651 - INFO - DEBUG Stats for textures:
+2026-02-10 14:10:33,582 - experiment_pot_debug_20260210_140651 - INFO -   ID Fuse: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:10:33,583 - experiment_pot_debug_20260210_140651 - INFO -   OOD Fuse: Mean=0.3960 Std=0.2172 Min=0.0000 Max=1.3749
+2026-02-10 14:10:33,583 - experiment_pot_debug_20260210_140651 - INFO -   Separation (Fuse): Min(OOD) - Max(ID) = -0.4724
+2026-02-10 14:10:33,583 - experiment_pot_debug_20260210_140651 - INFO -   ID Param: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:10:33,583 - experiment_pot_debug_20260210_140651 - INFO -   OOD Param: Mean=0.2060 Std=0.1500 Min=0.0000 Max=0.4894
+2026-02-10 14:10:33,583 - experiment_pot_debug_20260210_140651 - INFO -   ID OT: Mean=0.1353 Std=0.2647 Min=0.0014 Max=0.9929
+2026-02-10 14:10:33,583 - experiment_pot_debug_20260210_140651 - INFO -   OOD OT: Mean=0.4535 Std=0.3667 Min=0.0017 Max=0.9973
+2026-02-10 14:10:33,688 - experiment_pot_debug_20260210_140651 - INFO -   POT OOD Scores: Mean=-5.3238 Std=0.2890
+2026-02-10 14:10:33,698 - experiment_pot_debug_20260210_140651 - INFO - OOD textures Results:
+2026-02-10 14:10:33,698 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Fusion): 0.9136 | FPR@95: 0.3278
+2026-02-10 14:10:33,698 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Param): 0.8046 | FPR@95: 0.7786
+2026-02-10 14:10:33,698 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (OT):    0.8083 | FPR@95: 0.7832
+2026-02-10 14:10:33,698 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (POT):   0.8473 | FPR@95: 0.7477
+2026-02-10 14:10:33,698 - experiment_pot_debug_20260210_140651 - INFO - Starting OOD (tinyimagenet) Inference...
+2026-02-10 14:11:10,278 - experiment_pot_debug_20260210_140651 - INFO - DEBUG Stats for tinyimagenet:
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   ID Fuse: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   OOD Fuse: Mean=0.4129 Std=0.2306 Min=0.0000 Max=1.2884
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   Separation (Fuse): Min(OOD) - Max(ID) = -0.4725
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   ID Param: Mean=0.0667 Std=0.1153 Min=0.0000 Max=0.4725
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   OOD Param: Mean=0.2038 Std=0.1429 Min=0.0000 Max=0.4649
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   ID OT: Mean=0.1353 Std=0.2647 Min=0.0014 Max=0.9929
+2026-02-10 14:11:10,280 - experiment_pot_debug_20260210_140651 - INFO -   OOD OT: Mean=0.4634 Std=0.3676 Min=0.0016 Max=0.9964
+2026-02-10 14:11:10,420 - experiment_pot_debug_20260210_140651 - INFO -   POT OOD Scores: Mean=-5.3545 Std=0.2975
+2026-02-10 14:11:10,431 - experiment_pot_debug_20260210_140651 - INFO - OOD tinyimagenet Results:
+2026-02-10 14:11:10,431 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Fusion): 0.9091 | FPR@95: 0.3109
+2026-02-10 14:11:10,431 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (Param): 0.7974 | FPR@95: 0.8105
+2026-02-10 14:11:10,431 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (OT):    0.8114 | FPR@95: 0.7676
+2026-02-10 14:11:10,431 - experiment_pot_debug_20260210_140651 - INFO -   AUROC (POT):   0.8322 | FPR@95: 0.7826
+2026-02-10 14:11:10,431 - experiment_pot_debug_20260210_140651 - INFO - Starting OOD (noise) Inference...
+2026-02-10 14:11:11,951 - experiment_pot_debug_20260210_140651 - INFO - Saved analysis report to results/cifar100/analysis_report.xlsx
+✅ Telegram notification sent successfully!

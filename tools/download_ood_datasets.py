@@ -10,7 +10,13 @@ DOWNLOAD_URL_DICT = {
     'openimage_o': 'https://github.com/Jingkang50/OpenOOD/releases/download/v1.5/openimage_o.zip',  # TODO: Update this
 }
 
-# ... (DIR_DICT remains)
+# Target Directories relative to data/
+DIR_DICT = {
+    'places365': 'images_classic/places365',
+    'texture': 'images_classic/texture',
+    'inaturalist': 'images_largescale/inaturalist',
+    'openimage_o': 'images_largescale/openimage_o',
+}
 
 def download_file_from_url(url, dest_path):
     import requests
@@ -32,7 +38,28 @@ def download_file_from_url(url, dest_path):
         return False
     return True
 
-# ...
+def download_and_extract(dataset_name, data_root, source_dir=None):
+    if dataset_name not in DIR_DICT:
+        print(f"Dataset {dataset_name} not supported.")
+        return
+
+    rel_path = DIR_DICT[dataset_name]
+    dest_dir = os.path.join(data_root, rel_path)
+    if os.path.exists(dest_dir) and os.listdir(dest_dir):
+        print(f"Dataset {dataset_name} already exists at {dest_dir}. Skipping.")
+        return
+
+    os.makedirs(dest_dir, exist_ok=True)
+    
+    # Check for local source first
+    local_zip_path = None
+    if source_dir:
+        potential_zip = os.path.join(source_dir, f"{dataset_name}.zip")
+        if os.path.exists(potential_zip):
+            print(f"Found local dataset source for {dataset_name} at {potential_zip}")
+            local_zip_path = potential_zip
+        else:
+            print(f"Local source specified but {potential_zip} not found. Attempting download...")
 
     if local_zip_path:
         zip_path = local_zip_path

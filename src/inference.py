@@ -718,6 +718,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         ood_datasets = ['svhn', 'cifar100']
     elif Config.DATASET_NAME == 'cifar100':
         ood_datasets = ['svhn', 'cifar10']
+    elif Config.DATASET_NAME == 'imagenet100':
+        ood_datasets = ['inaturalist', 'places365', 'textures', 'openimage_o']
     
     # Extended OOD datasets (if requested)
     if args.extended_ood:

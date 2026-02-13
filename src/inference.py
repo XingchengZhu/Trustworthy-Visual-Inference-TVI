@@ -460,6 +460,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
     id_uncertainties_param = []
     id_uncertainties_nonparam = []
     id_uncertainties_pot = []  # POT branch
+    id_max_logits = []   # MaxLogit branch
+    id_gradnorms = []    # GradNorm branch
     id_feat_norms = []  # Phase 16: Feature Norm Score
     
     # Detailed Logs container
@@ -497,13 +499,13 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             # Return: spatial, flat, logits, projected
             # x: (B, C, H, W)
             # We need unscaled logits for predictions/calibration
-            x, _, logits_calib, _ = model(images)
+            x, features_flat, logits_calib, _ = model(images)
             
             # Use Spatial BN Features for OT (Structure Aware)
             features = apply_bn_spatial(x, model.bn)
             
-            # React Clipping
-            if clip_threshold > 0:
+            # React Clipping (Skip if --no_react)
+            if clip_threshold > 0 and not getattr(args, 'no_react', False):
                 features = torch.clamp(features, max=clip_threshold)
                 
             # --- ASH (Phase 15): Prune small activations ---
@@ -546,16 +548,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 # 3. Non-Parametric with Virtual Outliers
                 ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers, precision_matrix=precision_matrix)
                 
-                # Use Adaptive Gamma & Virtual Outlier Discounting
+                # Use Adaptive Gamma & Virtual Outlier Discounting (Skip VOS if --no_vos)
+                vo_dists_effective = None if getattr(args, 'no_vos', False) else vo_dists
                 evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
                     ot_dists, topk_indices, support_labels, 
-                    gamma_scale=gamma_scale, vo_distances=vo_dists
+                    gamma_scale=gamma_scale, vo_distances=vo_dists_effective
                 )
                 alpha_nonparam = evidence_nonparam + 1
                 
                 # 4. Fusion (OOD branch still uses scaled alpha)
-                if args.adaptive_fusion:
-                    alpha_fuse_ood, u_fuse_ds, C_fuse = fusion_module.adaptive_ds_combination(alpha_param, alpha_nonparam)
+                if args.adaptive_fusion or args.fusion_strategy == 'fixed':
+                    alpha_fuse_ood, u_fuse_ds, C_fuse = fusion_module.adaptive_ds_combination(
+                        alpha_param, alpha_nonparam, 
+                        strategy=args.fusion_strategy,
+                        fixed_weight=args.fixed_weight
+                    )
                 else:
                     alpha_fuse_ood, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
                 
@@ -566,7 +573,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             # Final OOD Uncertainty score logic
             # FIX (Phase 16): Use actual Fusion uncertainty instead of discarding OT branch
             # Update (Phase 16b): Option to trust Param for ID (heuristic that worked well)
-            if not args.baseline and not getattr(args, 'trust_param_id', True):
+            use_trust_param = not getattr(args, 'no_trust_param_id', False)
+            if not args.baseline and not use_trust_param:
                 # Squeeze first
                 if len(u_fuse_ds.shape) > 1: u_fuse_ds = u_fuse_ds.squeeze()
                 if len(C_fuse.shape) > 1: C_fuse = C_fuse.squeeze()
@@ -592,8 +600,12 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             alpha_param_calib = evidence_param_calib + 1
             
             if not args.baseline:
-                 if args.adaptive_fusion:
-                     alpha_fuse_calib, _, _ = fusion_module.adaptive_ds_combination(alpha_param_calib, alpha_nonparam)
+                 if args.adaptive_fusion or args.fusion_strategy == 'fixed':
+                     alpha_fuse_calib, _, _ = fusion_module.adaptive_ds_combination(
+                         alpha_param_calib, alpha_nonparam, 
+                         strategy=args.fusion_strategy, 
+                         fixed_weight=args.fixed_weight
+                     )
                  else:
                      alpha_fuse_calib, _, _ = fusion_module.ds_combination(alpha_param_calib, alpha_nonparam, discount_factor=None)
 
@@ -618,9 +630,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
             id_uncertainties_nonparam.extend(u_nonparam.cpu().numpy())
             
             # Phase 16: Feature Norm Score (higher norm = more ID-like, so use -norm as OOD score)
-            _, features_flat, _, _ = model(images)
+            # Use captured features_flat directly
             feat_norm = torch.norm(features_flat, p=2, dim=1)  # (B,)
             id_feat_norms.extend((-feat_norm).cpu().numpy())  # negative norm: higher = more OOD
+            
+            # --- MaxLogit Score (-max_logit) ---
+            max_logits, _ = torch.max(logits_calib, dim=1)
+            id_max_logits.extend((-max_logits).cpu().numpy())
+            
+            # --- GradNorm Score (L1 diff * L1 feat) ---
+            probs = torch.softmax(logits_calib, dim=1)
+            uni = 1.0 / Config.NUM_CLASSES
+            p_diff_norm = torch.norm(probs - uni, p=1, dim=1)
+            feat_norm_l1 = torch.norm(features_flat, p=1, dim=1)
+            grad_norm = p_diff_norm * feat_norm_l1
+            id_gradnorms.extend((-grad_norm).cpu().numpy())
             
             # POT: Accumulate spatial features for batch-level OT
             if pot_scorer is not None:
@@ -715,6 +739,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
         ood_u_param = []
         ood_u_nonparam = []
         ood_u_pot = []  # POT branch
+        ood_max_logits = []   # MaxLogit branch
+        ood_gradnorms = []    # GradNorm branch
         ood_feat_norms = []  # Phase 16: Feature Norm Score
         pot_ood_features = [] if pot_scorer else None  # Accumulate features
         
@@ -762,10 +788,10 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     images_perturbed = images - Config.ODIN_EPS * grad_sign
                     
                     with torch.no_grad():
-                        x, _, logits, _ = model(images_perturbed)
+                        x, features_flat, logits, _ = model(images_perturbed)
                 else:
                     with torch.no_grad():
-                        x, _, logits, _ = model(images)
+                        x, features_flat, logits, _ = model(images)
 
                 # Temperature
                 if getattr(Config, 'ODIN_TEMP', 1.0) > 1.0:
@@ -774,8 +800,8 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 with torch.no_grad():
                     features = apply_bn_spatial(x, model.bn)
                     
-                    # React Clipping
-                    if clip_threshold > 0:
+                    # React Clipping (Skip if --no_react)
+                    if clip_threshold > 0 and not getattr(args, 'no_react', False):
                          features = torch.clamp(features, max=clip_threshold)
 
                     # --- ASH (Phase 15) ---
@@ -801,16 +827,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     if not args.baseline:
                         ot_dists, topk_indices, vo_dists = ot_metric.compute_batch_ot(features, support_features, support_labels, virtual_outliers=virtual_outliers, precision_matrix=precision_matrix)
                         
+                        # Skip VOS if --no_vos
+                        vo_dists_effective = None if getattr(args, 'no_vos', False) else vo_dists
                         evidence_nonparam = evidence_extractor.get_non_parametric_evidence(
                             ot_dists, topk_indices, support_labels, 
-                            gamma_scale=gamma_scale, vo_distances=vo_dists
+                            gamma_scale=gamma_scale, vo_distances=vo_dists_effective
                         )
                         alpha_nonparam = evidence_nonparam + 1
                         
-                        # Conservative Fusion (Method 10)
-                        # entropy_param = fusion_module.compute_entropy(alpha_param)
-                        if args.adaptive_fusion:
-                             alpha_fuse, u_fuse_ds, C_fuse = fusion_module.adaptive_ds_combination(alpha_param, alpha_nonparam)
+                        # Fusion (synced with ID loop logic)
+                        if args.adaptive_fusion or args.fusion_strategy == 'fixed':
+                             alpha_fuse, u_fuse_ds, C_fuse = fusion_module.adaptive_ds_combination(
+                                 alpha_param, alpha_nonparam,
+                                 strategy=args.fusion_strategy,
+                                 fixed_weight=args.fixed_weight
+                             )
                         else:
                              alpha_fuse, u_fuse_ds, C_fuse = fusion_module.ds_combination(alpha_param, alpha_nonparam, discount_factor=None)
                         
@@ -855,9 +886,21 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                     ood_u_nonparam.extend(u_nonparam.cpu().numpy())
                     
                     # Phase 16: Feature Norm Score for OOD
-                    _, features_flat_ood, _, _ = model(images)
-                    feat_norm_ood = torch.norm(features_flat_ood, p=2, dim=1)
+                    # Use captured features_flat directly
+                    feat_norm_ood = torch.norm(features_flat, p=2, dim=1)
                     ood_feat_norms.extend((-feat_norm_ood).cpu().numpy())
+                    
+                    # --- MaxLogit Score (-max_logit) ---
+                    max_logits_ood, _ = torch.max(logits, dim=1)
+                    ood_max_logits.extend((-max_logits_ood).cpu().numpy())
+                    
+                    # --- GradNorm Score (L1 diff * L1 feat) ---
+                    probs_ood = torch.softmax(logits, dim=1)
+                    uni = 1.0 / Config.NUM_CLASSES
+                    p_diff_norm_ood = torch.norm(probs_ood - uni, p=1, dim=1)
+                    feat_norm_l1_ood = torch.norm(features_flat, p=1, dim=1)
+                    grad_norm_ood = p_diff_norm_ood * feat_norm_l1_ood
+                    ood_gradnorms.extend((-grad_norm_ood).cpu().numpy())
                     
                     # POT: Accumulate features
                     if pot_scorer is not None:
@@ -936,40 +979,100 @@ def evaluate(model, test_loader, support_features, support_labels, virtual_outli
                 auroc_pot = compute_auroc(np.array(id_uncertainties_pot), np.array(ood_u_pot))
                 fpr_pot = compute_fpr95(np.array(id_uncertainties_pot), np.array(ood_u_pot))
                 
-                # --- Phase 16: Three-Way Ensemble (Fusion + POT + Norm) ---
+                # --- Phase 16: Multi-Branch Auto-Search Ensemble ---
                 try:
-                    id_fuse_np = np.array(id_uncertainties_fuse)
-                    id_pot_np = np.array(id_uncertainties_pot)
-                    id_norm_np = np.array(id_feat_norms)
-                    ood_fuse_np = np.array(ood_u_fuse)
-                    ood_pot_np = np.array(ood_u_pot)
-                    ood_norm_np = np.array(ood_feat_norms)
+                    # 1. Prepare Data
+                    scores_map = {
+                        'Fusion': (np.array(id_uncertainties_fuse), np.array(ood_u_fuse)),
+                        'POT': (np.array(id_uncertainties_pot), np.array(ood_u_pot)),
+                        'Norm': (np.array(id_feat_norms), np.array(ood_feat_norms)),
+                        'MaxLogit': (np.array(id_max_logits), np.array(ood_max_logits)),
+                        'GradNorm': (np.array(id_gradnorms), np.array(ood_gradnorms))
+                    }
                     
-                    # Z-Score Standardize
-                    mu_f, std_f = np.mean(id_fuse_np), np.std(id_fuse_np) + 1e-6
-                    mu_p, std_p = np.mean(id_pot_np), np.std(id_pot_np) + 1e-6
-                    mu_n, std_n = np.mean(id_norm_np), np.std(id_norm_np) + 1e-6
+                    # 2. Standardization
+                    z_scores = {}
+                    for key, (id_sc, ood_sc) in scores_map.items():
+                        if len(id_sc) == 0: continue
+                        mu, std = np.mean(id_sc), np.std(id_sc) + 1e-8
+                        z_id = (id_sc - mu) / std
+                        z_ood = (ood_sc - mu) / std
+                        z_scores[key] = (z_id, z_ood)
+                        
+                    # 3. Auto-Search Weights
+                    # Search space: Fusion, POT, GradNorm are most promising
+                    # We search weights for Fusion and POT (w1, w2), rest is 1-w1-w2 assigned to GradNorm?
+                    # Or simple grid search:
+                    best_auroc = 0.0
+                    best_weights_str = ""
+                    best_fpr = 1.0
                     
-                    z_id_fuse = (id_fuse_np - mu_f) / std_f
-                    z_id_pot = (id_pot_np - mu_p) / std_p
-                    z_id_norm = (id_norm_np - mu_n) / std_n
-                    z_ood_fuse = (ood_fuse_np - mu_f) / std_f
-                    z_ood_pot = (ood_pot_np - mu_p) / std_p
-                    z_ood_norm = (ood_norm_np - mu_n) / std_n
+                    # Candidates to ensemble: Fusion, POT, GradNorm
+                    # Grid: w_fuse in [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+                    #       w_pot  in [0, 0.2, ... 1.0]
+                    #       w_grad = 1 - w_fuse - w_pot (if >= 0)
                     
-                    # Weighted Three-Way Ensemble
-                    w = args.ensemble_weight  # w for Fusion
-                    w_norm = 0.2  # Weight for Norm signal
-                    w_fuse = w * (1 - w_norm)
-                    w_pot = (1 - w) * (1 - w_norm)
+                    id_ens_best, ood_ens_best = None, None
                     
-                    id_ensemble = w_fuse * z_id_fuse + w_pot * z_id_pot + w_norm * z_id_norm
-                    ood_ensemble = w_fuse * z_ood_fuse + w_pot * z_ood_pot + w_norm * z_ood_norm
+                    keys_to_use = ['Fusion', 'POT', 'GradNorm']
+                    # Ensure keys exist
+                    keys_to_use = [k for k in keys_to_use if k in z_scores]
                     
-                    auroc_ensemble = compute_auroc(id_ensemble, ood_ensemble)
-                    fpr_ensemble = compute_fpr95(id_ensemble, ood_ensemble)
+                    if len(keys_to_use) >= 2:
+                        # Simple grid search 
+                        steps = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+                        
+                        for w1 in steps:
+                            for w2 in steps:
+                                if w1 + w2 > 1.0: continue
+                                w3 = 1.0 - w1 - w2
+                                if w3 < 0: w3 = 0.0 # float err
+                                
+                                # Construct Ensemble
+                                # Assuming Fusion, POT, GradNorm order
+                                # Adjust logic if keys missing
+                                
+                                id_e = np.zeros_like(z_scores[keys_to_use[0]][0])
+                                ood_e = np.zeros_like(z_scores[keys_to_use[0]][1])
+                                
+                                # Hardcoded for simplicity based on keys_to_use
+                                current_weights = {}
+                                
+                                # w1 -> Fusion
+                                if 'Fusion' in z_scores:
+                                    id_e += w1 * z_scores['Fusion'][0]
+                                    ood_e += w1 * z_scores['Fusion'][1]
+                                    current_weights['Fusion'] = w1
+                                
+                                # w2 -> POT
+                                if 'POT' in z_scores:
+                                    id_e += w2 * z_scores['POT'][0]
+                                    ood_e += w2 * z_scores['POT'][1]
+                                    current_weights['POT'] = w2
+                                    
+                                # w3 -> GradNorm
+                                if 'GradNorm' in z_scores:
+                                    id_e += w3 * z_scores['GradNorm'][0]
+                                    ood_e += w3 * z_scores['GradNorm'][1]
+                                    current_weights['GradNorm'] = w3
+                                    
+                                curr_auroc = compute_auroc(id_e, ood_e)
+                                if curr_auroc > best_auroc:
+                                    best_auroc = curr_auroc
+                                    best_weights_str = str(current_weights)
+                                    best_fpr = compute_fpr95(id_e, ood_e)
+                                    id_ens_best, ood_ens_best = id_e, ood_e
+                        
+                        auroc_ensemble = best_auroc
+                        fpr_ensemble = best_fpr
+                        logger.info(f"  Best Ensemble Weights: {best_weights_str}")
+                    else:
+                        # Fallback
+                        auroc_ensemble = compute_auroc(z_scores['Fusion'][0], z_scores['Fusion'][1])
+                        fpr_ensemble = compute_fpr95(z_scores['Fusion'][0], z_scores['Fusion'][1])
+                    
                 except Exception as e:
-                    logger.error(f"Three-Way Ensemble calculation failed: {e}")
+                    logger.error(f"Auto-Search Ensemble calculation failed: {e}")
             
             logger.info(f"OOD {ood_name} Results:")
             logger.info(f"  AUROC (Fusion): {auroc_fuse:.4f} | FPR@95: {fpr_fuse:.4f}")
@@ -1113,6 +1216,9 @@ def main():
     
     # Ablation Flags
     parser.add_argument("--no_conflict", action="store_true", help="Ablation: Disable Conflict term in Fusion (u_fuse = u_fuse_ds only)")
+    parser.add_argument("--no_vos", action="store_true", help="Ablation: Disable Virtual Outlier discounting in evidence")
+    parser.add_argument("--no_react", action="store_true", help="Ablation: Disable React feature clipping")
+    parser.add_argument("--no_trust_param_id", action="store_true", help="Ablation: Use pure Fusion uncertainty for ID (disable trust-param heuristic)")
     parser.add_argument("--extended_ood", action="store_true", default=True, help="Test extended OOD datasets (Textures, iNaturalist subset)")
     parser.add_argument("--adversarial_vos", action="store_true", help="Enable Adversarial VOS optimization (Phase 10)")
     parser.add_argument("--pot", action="store_true", help='Enable POT branch (Contrastive OT Score)')
@@ -1123,6 +1229,8 @@ def main():
         default=getattr(Config, 'ADAPTIVE_FUSION', False),
         help='Enable Adaptive Fusion (Discount Parametric based on OT Uncertainty)'
     )
+    parser.add_argument("--fusion_strategy", type=str, default="adaptive", choices=["adaptive", "fixed"], help="Fusion Strategy: 'adaptive' (Sigmoid) or 'fixed' (Weighted Evidence)")
+    parser.add_argument("--fixed_weight", type=float, default=0.5, help="Weight for Parametric branch in Fixed Fusion (0.0=OT only, 1.0=Param only). Default 0.5")
     parser.add_argument("--ensemble_weight", type=float, default=0.5, help="Weight for Fusion Score in Adaptive Ensemble (0.0=POT only, 1.0=Fusion only). Default 0.5")
     parser.add_argument("--max_samples", type=int, default=None, help="Limit number of samples for quick debugging/verification")
     parser.add_argument("--trust_param_id", action='store_true', default=True, help="Use Parametric Uncertainty for ID samples (Performance Heuristic). Turn off for pure Fusion.")

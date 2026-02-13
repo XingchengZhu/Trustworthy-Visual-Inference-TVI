@@ -12,6 +12,7 @@ data/
 # Results and Checkpoints
 results/
 checkpoints/
+compete/
 
 # Environment
 venv/

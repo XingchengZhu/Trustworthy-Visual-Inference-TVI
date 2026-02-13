@@ -135,31 +135,40 @@ class DempsterShaferFusion:
         
         return alpha_fuse, u_fuse, C
 
-    def adaptive_ds_combination(self, alpha_param, alpha_nonparam):
+    def adaptive_ds_combination(self, alpha_param, alpha_nonparam, strategy='adaptive', fixed_weight=0.5):
         """
         Adaptive Fusion: Trust Parametric ONLY if Non-Parametric (OT) is certain.
-        If OT is uncertain (high distance), we discount the Parametric belief.
-        This fixes the "Confident but Wrong" problem of Softmax on OOD.
-        
-        Mechanism:
-        trust_param = 1.0 - u_ot
-        alpha_param_new = (alpha_param - 1) * trust_param + 1
+        strategy='adaptive': Use Sigmoid discount based on OT uncertainty.
+        strategy='fixed': Use fixed weighted average of EVIDENCE.
         """
+        if strategy == 'fixed':
+             # Robust Fixed Fusion: Weighted Average of Evidence
+             # e_fuse = w * e_param + (1-w) * e_nonparam
+             evidence_param = alpha_param - 1
+             evidence_nonparam = alpha_nonparam - 1
+             evidence_fuse = fixed_weight * evidence_param + (1 - fixed_weight) * evidence_nonparam
+             alpha_fuse = evidence_fuse + 1
+             
+             S = torch.sum(alpha_fuse, dim=1, keepdim=True)
+             u = self.num_classes / (S + 1e-8)
+             C = torch.zeros_like(u) # No conflict term in simple average
+             return alpha_fuse, u, C
+
         # 1. Calculate OT Uncertainty
         S_ot = torch.sum(alpha_nonparam, dim=1, keepdim=True)
-        # u = K / S
         u_ot = self.num_classes / S_ot
         
-        # 2. Calculate Trust Factor
-        # If u_ot is 1.0 (Total OOD), trust is 0.0 -> Param becomes uniform/uncertain.
-        # If u_ot is 0.0 (Perfect ID), trust is 1.0 -> Param kept as is.
-        trust_param = 1.0 - u_ot
+        # 2. Sigmoid Non-Linear Trust Factor
+        # k=10: steepness of transition
+        # threshold=0.3: center of sigmoid transition
+        # u_ot < 0.3 (ID-like) -> trust ≈ 1.0
+        # u_ot > 0.3 (OOD-like) -> trust ≈ 0.0
+        k = getattr(Config, 'ADAPTIVE_SIGMOID_K', 10.0)
+        threshold = getattr(Config, 'ADAPTIVE_SIGMOID_THRESHOLD', 0.3)
+        trust_param = torch.sigmoid(-k * (u_ot - threshold))
         trust_param = torch.clamp(trust_param, 0.0, 1.0)
         
         # 3. Discount Parametric Alpha
-        # alpha = evidence + 1
-        # new_evidence = old_evidence * trust
-        # new_alpha = new_evidence + 1 = (alpha - 1) * trust + 1
         alpha_param_new = (alpha_param - 1) * trust_param + 1
         
         # 4. Standard Fusion with Discounted Param

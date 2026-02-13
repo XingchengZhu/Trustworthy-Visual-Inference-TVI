@@ -45,17 +45,28 @@ def download_and_extract(dataset_name, data_root):
     # gdown output path. If it's a folder, gdown might download a file inside it.
     # We want the zip file.
     zip_path = os.path.join(dest_dir, f"{dataset_name}.zip")
+
+    proxy_domain = "gdrive.testx.asia" 
+    download_url = f"https://{proxy_domain}/uc?id={file_id}"
     
     try:
-        gdown.download(id=file_id, output=zip_path, quiet=False)
+        gdown.download(url=download_url, output=zip_path, quiet=False, resume=True)
         
         if not os.path.exists(zip_path):
             print(f"Download failed for {dataset_name}.")
             return
 
         print(f"Extracting {dataset_name}...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(dest_dir)
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(dest_dir)
+        except zipfile.BadZipFile:
+            print(f"Error: 压缩包不完整或已损坏 ({dataset_name}.zip)！")
+            print("这可能是因为网络中断导致文件不全。正在删除损坏的文件...")
+            os.remove(zip_path)
+            print("请重新运行脚本，它会从头下载或触发正确的断点续传。")
+            return
         
         # Cleanup
         os.remove(zip_path)
